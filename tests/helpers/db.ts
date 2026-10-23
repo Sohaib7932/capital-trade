@@ -71,8 +71,14 @@ export class TestDb {
     await this.pg.transaction((tx) => freezeMonth({ query: (text, params) => tx.query(text, params) }, month));
   }
 
+  /** Set an IB's rule and switch IB commissions on (they're off by default). */
   async setIbCommission(ibId: string, percent: number, source: "from_company_share" | "additional"): Promise<void> {
     await this.pg.query("UPDATE ibs SET commission_percent = $2, commission_source = $3 WHERE id = $1", [ibId, percent, source]);
+    await this.setIbCommissionsEnabled(true);
+  }
+
+  async setIbCommissionsEnabled(enabled: boolean): Promise<void> {
+    await this.pg.query("UPDATE settings SET ib_commissions_enabled = $1 WHERE id = 1", [enabled]);
   }
 
   async setSplit(clientId: string, split: SplitPercent): Promise<void> {
@@ -82,10 +88,6 @@ export class TestDb {
       split.company,
       split.client,
     ]);
-  }
-
-  async setLossHandling(mode: "carry_forward" | "reset_monthly"): Promise<void> {
-    await this.pg.query("UPDATE settings SET loss_handling = $1 WHERE id = 1", [mode]);
   }
 
   /** Recompute open months, as the app does after a change. `today` decides the current month. */

@@ -28,14 +28,13 @@ describe("finalized months are locked", () => {
     ]);
   });
 
-  it("doesn't change when trades, splits, IB rules or loss handling change afterwards", async () => {
+  it("doesn't change when trades, splits or IB rules change afterwards", async () => {
     await db.finalize("2026-03");
     const before = (await db.ledger()).monthlySplit("2026-03");
 
     await db.trade("2026-03-20T09:00:00Z", "-9000.00"); // a late trade in the locked month
     await db.setSplit("A", { trader: 10, company: 10, client: 80 });
     await db.setIbCommission("ib-01", 50, "additional");
-    await db.setLossHandling("reset_monthly");
     await db.recompute();
 
     const after = (await db.ledger()).monthlySplit("2026-03");
@@ -50,8 +49,7 @@ describe("finalized months are locked", () => {
     await db.trade("2026-03-06T09:00:00Z", "-3000.00"); // March nets −2,000
     await db.recompute();
     await db.finalize("2026-03");
-    await db.setLossHandling("reset_monthly"); // must not rewrite March's frozen carry
-    await db.setLossHandling("carry_forward");
+    await db.setSplit("A", { trader: 10, company: 10, client: 80 }); // must not rewrite March's frozen carry
     const april = (await db.ledger()).monthlySplit("2026-04").rows[0];
     expect(april).toMatchObject({ carryIn: "-2000.00", carryOut: "-1500.00", trader: "0.00", client: "500.00" });
   });

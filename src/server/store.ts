@@ -88,9 +88,6 @@ const MT5_SUMMARY_SQL = `(SELECT row_to_json(r) FROM (
  * the frozen settlement rows of finalized months.
  */
 const SNAPSHOT_SQL = `
-WITH _ensure_month AS (
-  INSERT INTO months (month) VALUES ($1) ON CONFLICT DO NOTHING
-)
 SELECT
   (SELECT COALESCE(json_agg(r ORDER BY r.code), '[]') FROM (
      SELECT id, code, name, phone, email, status, joined_at AS "joinedAt", notes,
@@ -118,7 +115,8 @@ SELECT
             split_company::text, split_client::text, ib_percent::text, ib_source, gross::text, carry_in::text,
             carry_out::text, trader::text, company::text, client::text, ib::text FROM settlements) r) AS settlements,
   (SELECT row_to_json(r) FROM (
-     SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols
+     SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols,
+            ib_commissions_enabled, sync_interval_seconds
        FROM settings WHERE id = 1) r) AS settings,
   ${MT5_SUMMARY_SQL} AS mt5`;
 
@@ -150,7 +148,7 @@ interface SnapshotRow {
   settlements: ({
     month: string;
     client_id: string;
-    ib_id: string;
+    ib_id: string | null;
     capital: string;
     pool_share: string;
     active_days: number;
@@ -171,7 +169,7 @@ interface SnapshotRow {
 export async function loadLedger(db: Queryable = pool()): Promise<Ledger> {
   const now = new Date();
   const currentMonth = monthOf(toISODate(now));
-  const { rows } = await db.query<SnapshotRow>(SNAPSHOT_SQL, [currentMonth]);
+  const { rows } = await db.query<SnapshotRow>(SNAPSHOT_SQL);
   const data = rows[0];
   const settings = toSettings(data.settings, data.mt5, now);
 
@@ -191,7 +189,7 @@ export async function loadLedger(db: Queryable = pool()): Promise<Ledger> {
         : undefined;
     months[r.month] = { status: r.status, finalizedAt: orUndefined(r.finalized_at), frozen };
   }
-  // The insert above isn't visible to the SELECT in the same statement.
+  // The current month is always there, even before it has a row (rows are created on write).
   months[currentMonth] ??= { status: "open" };
 
   const allocations: Snapshot["allocations"] = {};
@@ -245,12 +243,9 @@ export async function loadLedger(db: Queryable = pool()): Promise<Ledger> {
 
 /** Months that have data, newest first (creating the current month if needed). */
 export async function getMonths(): Promise<MonthKey[]> {
-  const { rows } = await pool().query<{ month: string }>(
-    `WITH ensured AS (INSERT INTO months (month) VALUES ($1) ON CONFLICT DO NOTHING RETURNING month)
-     SELECT month FROM months UNION SELECT month FROM ensured ORDER BY month DESC`,
-    [thisMonth()],
-  );
-  return rows.map((r) => r.month);
+  // Read-only: the current month is always listed, even before it has a row.
+  const { rows } = await pool().query<{ month: string }>("SELECT month FROM months");
+  return [...new Set([thisMonth(), ...rows.map((r) => r.month)])].sort().reverse();
 }
 
 function withCumulative(rows: Omit<DailyPerformance, "cumulative">[]): DailyPerformance[] {
@@ -374,6 +369,8 @@ type SettingsRow = SplitColumns & {
   loss_handling: LossHandling;
   business_timezone: string;
   gold_symbols: string[];
+  ib_commissions_enabled: boolean;
+  sync_interval_seconds: number;
 };
 
 interface Mt5SummaryRow {
@@ -393,6 +390,8 @@ function toSettings(row: SettingsRow | null | undefined, mt5: Mt5SummaryRow, now
     lossHandling: row.loss_handling,
     businessTimezone: row.business_timezone,
     goldSymbols: row.gold_symbols,
+    ibCommissionsEnabled: row.ib_commissions_enabled,
+    syncIntervalSeconds: row.sync_interval_seconds,
     mt5: {
       accounts: mt5.accounts,
       lastSyncAt: mt5.last_sync_at,
@@ -406,7 +405,8 @@ function toSettings(row: SettingsRow | null | undefined, mt5: Mt5SummaryRow, now
 async function loadSettingsRow(db: Queryable = pool()): Promise<Omit<Settings, "profile">> {
   const { rows } = await db.query<{ settings: SettingsRow | null; mt5: Mt5SummaryRow }>(
     `SELECT (SELECT row_to_json(r) FROM (
-               SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols
+               SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols,
+                      ib_commissions_enabled, sync_interval_seconds
                  FROM settings WHERE id = 1) r) AS settings,
             ${MT5_SUMMARY_SQL} AS mt5`,
   );
@@ -474,8 +474,10 @@ export async function createClient(user: SessionUser, input: CreateClientInput):
 
   const id = await transaction(async (tx) => {
     await assertDateOpen(tx, input.investmentDate, "The investment date");
-    const ib = await tx.query("SELECT 1 FROM ibs WHERE id = $1 AND status = 'active'", [input.ibId]);
-    if (!ib.rowCount) throw badRequest("Choose an active IB");
+    if (input.ibId) {
+      const ib = await tx.query("SELECT 1 FROM ibs WHERE id = $1 AND status = 'active'", [input.ibId]);
+      if (!ib.rowCount) throw badRequest("Choose an active IB, or Direct");
+    }
     // Serialise id allocation so two simultaneous adds can't collide.
     await tx.query("LOCK TABLE clients IN SHARE ROW EXCLUSIVE MODE");
     const n = await nextNumber(tx, "clients");
@@ -522,8 +524,10 @@ export async function updateClient(user: SessionUser, id: string, input: UpdateC
   await transaction(async (tx) => {
     const before = (await loadLedger(tx)).client(id);
     if (!before) throw notFound("Client not found");
-    const ib = await tx.query("SELECT 1 FROM ibs WHERE id = $1", [input.ibId]);
-    if (!ib.rowCount) throw badRequest("Unknown IB");
+    if (input.ibId) {
+      const ib = await tx.query("SELECT 1 FROM ibs WHERE id = $1", [input.ibId]);
+      if (!ib.rowCount) throw badRequest("Unknown IB");
+    }
     await tx.query(
       `UPDATE clients SET full_name = $2, phone = $3, email = $4, ib_id = $5, status = $6,
               split_trader = $7, split_company = $8, split_client = $9, notes = $10
@@ -731,6 +735,8 @@ export async function updateIB(user: SessionUser, id: string, input: UpdateIBInp
  * Run inside a transaction. Used by Finalize Month and by the seed.
  */
 export async function freezeMonth(tx: Queryable, month: MonthKey): Promise<MonthlySplit> {
+  // A month with no trades yet may not have a row (reads never create one).
+  await tx.query("INSERT INTO months (month) VALUES ($1) ON CONFLICT DO NOTHING", [month]);
   await tx.query("SELECT 1 FROM months WHERE month = $1 FOR UPDATE", [month]);
   const ledger = await loadLedger(tx);
   const blocker = ledger.finalizeBlocker(month);
@@ -843,7 +849,7 @@ export async function markPaid(user: SessionUser, month: MonthKey, partyType: Pa
     const { rows: m } = await tx.query<{ status: string }>("SELECT status FROM months WHERE month = $1", [month]);
     if (m[0]?.status !== "finalized") throw badRequest("Finalize the month before marking payouts as paid");
     const { rows } = await tx.query<{ amount: string | null; paid_at: string }>(
-      `UPDATE payouts SET status = 'paid', paid_at = CURRENT_DATE
+      `UPDATE payouts SET status = 'paid', paid_at = CURRENT_DATE, paid_via = 'manual'
         WHERE month = $1 AND party_type = $2 AND party_id = $3 AND status = 'pending'
         RETURNING amount::text, to_char(paid_at, 'YYYY-MM-DD') AS paid_at`,
       [month, partyType, partyId],
@@ -879,8 +885,14 @@ export async function updateSettings(user: SessionUser, update: SettingsUpdate):
       const { trader, company, client } = update.defaultSplit;
       await tx.query("UPDATE settings SET split_trader = $1, split_company = $2, split_client = $3 WHERE id = 1", [trader, company, client]);
     }
-    if (update.lossHandling) {
-      await tx.query("UPDATE settings SET loss_handling = $1 WHERE id = 1", [update.lossHandling]);
+    if (update.lossHandling && update.lossHandling !== "carry_forward") {
+      throw badRequest("Losses always carry forward per client");
+    }
+    if (update.ibCommissionsEnabled !== undefined && update.ibCommissionsEnabled !== before.ibCommissionsEnabled) {
+      await tx.query("UPDATE settings SET ib_commissions_enabled = $1 WHERE id = 1", [update.ibCommissionsEnabled]);
+    }
+    if (update.syncIntervalSeconds !== undefined) {
+      await tx.query("UPDATE settings SET sync_interval_seconds = $1 WHERE id = 1", [update.syncIntervalSeconds]);
     }
     if (update.businessTimezone && update.businessTimezone !== before.businessTimezone) {
       await tx.query("UPDATE settings SET business_timezone = $1 WHERE id = 1", [update.businessTimezone]);

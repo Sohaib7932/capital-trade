@@ -7,6 +7,7 @@ import { useApp } from "@/components/layout/app-context";
 import { DataTable } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/shared/empty-state";
 import { KpiCard } from "@/components/shared/kpi-card";
+import { LoadError } from "@/components/shared/load-error";
 import { ProfitText } from "@/components/shared/profit-text";
 import { ChartSkeleton, KpiGridSkeleton, TableSkeleton } from "@/components/shared/skeletons";
 import { Pill } from "@/components/shared/status-badge";
@@ -35,7 +36,11 @@ import { ProfitPerformanceChart } from "./profit-performance-chart";
 
 export function DashboardView() {
   const { month, dataVersion } = useApp();
-  const { data: stats } = useAsync(() => getDashboardStats(month!), [month, dataVersion], {
+  const {
+    data: stats,
+    error,
+    reload,
+  } = useAsync(() => getDashboardStats(month ?? ""), [month, dataVersion], {
     enabled: month !== null,
   });
 
@@ -48,7 +53,13 @@ export function DashboardView() {
         </p>
       </div>
 
-      {stats ? <KpiRow stats={stats} /> : <KpiGridSkeleton count={5} className="xl:grid-cols-5" />}
+      {stats ? (
+        <KpiRow stats={stats} />
+      ) : error ? (
+        <LoadError error={error} onRetry={reload} />
+      ) : (
+        <KpiGridSkeleton count={5} className="xl:grid-cols-5" />
+      )}
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <Card className="gap-0 py-0 xl:col-span-2">
@@ -61,6 +72,8 @@ export function DashboardView() {
           </div>
           {stats ? (
             <ProfitDistribution distribution={stats.distribution} />
+          ) : error ? (
+            <LoadError error={error} onRetry={reload} className="border-0" />
           ) : (
             <div className="space-y-4" aria-hidden>
               <Skeleton className="mx-auto size-48 rounded-full" />
@@ -147,7 +160,7 @@ function KpiRow({ stats }: { stats: DashboardStats }) {
 function PerformancePanel({ month, dataVersion }: { month: MonthKey; dataVersion: number }) {
   const [view, setView] = useState<"current" | "previous">("current");
   const shownMonth = view === "current" ? month : shiftMonth(month, -1);
-  const { data } = useAsync(() => getDailyPerformance(shownMonth), [shownMonth, dataVersion]);
+  const { data, error, reload } = useAsync(() => getDailyPerformance(shownMonth), [shownMonth, dataVersion]);
 
   return (
     <>
@@ -193,7 +206,11 @@ function PerformancePanel({ month, dataVersion }: { month: MonthKey; dataVersion
           </span>
         </div>
         {!data ? (
-          <ChartSkeleton />
+          error ? (
+            <LoadError error={error} onRetry={reload} className="h-72 border-0" />
+          ) : (
+            <ChartSkeleton />
+          )
         ) : data.length === 0 ? (
           <EmptyState icon={LineChart} title="No closed trades" description={`No trades closed in ${formatMonth(shownMonth)}.`} className="h-72" />
         ) : (

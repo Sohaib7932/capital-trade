@@ -16,6 +16,7 @@
     "user:create": "tsx scripts/create-user.ts",
     "mt5:send-fake": "tsx scripts/send-fake-deals.ts",
     "mt5:account": "tsx scripts/mt5-account.ts",
+    "mt5:keygen": "tsx scripts/mt5-keygen.ts",
     "db:clear-demo": "tsx scripts/clear-demo.ts"
   },
   "dependencies": {

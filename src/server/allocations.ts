@@ -25,8 +25,10 @@ const MONTH_DEALS = `
  *   (profit only appears on closing deals; entry commissions count on their day).
  * - Lots = volume of opening (IN) deals, so a round trip isn't counted twice.
  * - Pooled accounts: the day's net is shared by each client's active capital.
- *   Capital on day D = deposits dated before D − withdrawals dated on or before D.
- * - An account linked to one client: all of its net goes to that client.
+ *   Capital on day D = deposits dated before D − withdrawals dated on or before D,
+ *   counting manual (pool) transactions only.
+ * - An account linked to one client: all of its net goes to that client, whatever
+ *   their capital. Capital from their own account's deposits never weights the pool.
  */
 export async function recomputeMonth(db: Queryable, month: MonthKey, timezone: string): Promise<void> {
   await db.query("DELETE FROM daily_pnl WHERE month = $1", [month]); // cascades to daily_allocations
@@ -49,7 +51,8 @@ export async function recomputeMonth(db: Queryable, month: MonthKey, timezone: s
               sum(CASE WHEN x.type = 'deposit' THEN x.amount ELSE -x.amount END) AS capital
          FROM daily_pnl d
          JOIN transactions x
-           ON (x.type = 'deposit' AND x.date < d.day) OR (x.type = 'withdrawal' AND x.date <= d.day)
+           ON x.source = 'manual'
+          AND ((x.type = 'deposit' AND x.date < d.day) OR (x.type = 'withdrawal' AND x.date <= d.day))
         WHERE d.month = $1
         GROUP BY d.day, x.client_id
        HAVING sum(CASE WHEN x.type = 'deposit' THEN x.amount ELSE -x.amount END) > 0

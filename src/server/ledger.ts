@@ -39,7 +39,8 @@ export interface ClientRecord {
   fullName: string;
   phone: string;
   email: string;
-  ibId: string;
+  /** Null = Direct client. */
+  ibId: string | null;
   joinedAt: ISODate;
   status: ClientStatus;
   split: SplitPercent;
@@ -92,7 +93,7 @@ export interface MonthClientAllocation {
 /** A client's numbers for a finalized month, from `settlements`. */
 export interface SettlementRecord {
   clientId: string;
-  ibId: string;
+  ibId: string | null;
   capital: DecimalString;
   poolShare: DecimalString;
   activeDays: number;
@@ -120,12 +121,17 @@ export interface Snapshot {
   settlements: Record<MonthKey, SettlementRecord[]>;
   defaultSplit: SplitPercent;
   lossHandling: LossHandling;
+  /** Off: no IB commission is calculated (rules are kept for later). */
+  ibCommissionsEnabled: boolean;
   businessTimezone: string;
   mt5: Mt5Summary;
   now: Date;
 }
 
 export const TRADER_PARTY_ID = "trader";
+/** Shown wherever an IB would be, for clients without one. */
+export const DIRECT_LABEL = "Direct";
+const NO_COMMISSION: IBCommissionRule = { percent: 0, source: "from_company_share" };
 
 export function payoutKey(month: MonthKey, partyType: PartyType, partyId: string): string {
   return `${month}:${partyType}:${partyId}`;
@@ -148,7 +154,9 @@ export class Ledger {
 
   constructor(private readonly s: Snapshot) {
     const clientSplits = new Map(s.clients.map((c) => [c.id, c.split]));
-    const ibRules = new Map(s.clients.map((c) => [c.id, this.ibOf(c.ibId)?.commission ?? { percent: 0, source: "from_company_share" as const }]));
+    const ibRules = new Map(
+      s.clients.map((c) => [c.id, (s.ibCommissionsEnabled && this.ibOf(c.ibId)?.commission) || NO_COMMISSION]),
+    );
 
     let carry = new Map<string, DecimalString>();
     for (const month of this.months()) {
@@ -212,7 +220,7 @@ export class Ledger {
           ...r,
           clientCode: client.code,
           clientName: client.fullName,
-          ibName: this.ibOf(r.ibId)?.name ?? "—",
+          ibName: this.ibName(r.ibId),
           payoutStatus: payout?.status ?? "pending",
           payoutAmount: finalized && payout?.amount ? payout.amount : nonNegative(r.client),
           paidAt: payout?.paidAt,
@@ -233,7 +241,7 @@ export class Ledger {
       };
     };
     const ibTotals = new Map<string, Decimal>();
-    for (const r of rows) ibTotals.set(r.ibId, (ibTotals.get(r.ibId) ?? new Decimal(0)).plus(r.ib));
+    for (const r of rows) if (r.ibId) ibTotals.set(r.ibId, (ibTotals.get(r.ibId) ?? new Decimal(0)).plus(r.ib));
     const partyPayouts = [
       party("trader", TRADER_PARTY_ID, "Trader", sum(rows.map((r) => r.trader))),
       ...[...ibTotals]
@@ -318,8 +326,12 @@ export class Ledger {
     return c;
   }
 
-  private ibOf(ibId: string): IB | undefined {
-    return this.s.ibs.find((ib) => ib.id === ibId);
+  private ibOf(ibId: string | null): IB | undefined {
+    return ibId ? this.s.ibs.find((ib) => ib.id === ibId) : undefined;
+  }
+
+  private ibName(ibId: string | null): string {
+    return ibId ? (this.ibOf(ibId)?.name ?? "—") : DIRECT_LABEL;
   }
 
   /** Capital after every transaction dated on or before `date`. */
@@ -334,7 +346,7 @@ export class Ledger {
   toClient(record: ClientRecord): Client {
     return {
       ...record,
-      ibName: this.ibOf(record.ibId)?.name ?? "—",
+      ibName: this.ibName(record.ibId),
       investedCapital: toMoney(this.capitalAsOf(record.id, "9999-12-31")),
     };
   }
@@ -439,7 +451,7 @@ export class Ledger {
     const month = query.month ?? this.currentMonth;
     const search = query.search?.trim().toLowerCase();
     const all = this.s.clients
-      .filter((c) => !query.ibId || c.ibId === query.ibId)
+      .filter((c) => !query.ibId || (query.ibId === "direct" ? c.ibId === null : c.ibId === query.ibId))
       .filter((c) => !query.status || c.status === query.status)
       .filter((c) => !search || [c.fullName, c.code, c.phone, c.email].some((v) => v.toLowerCase().includes(search)))
       .map((c) => this.toClientSummary(c, month));

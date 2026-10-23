@@ -262,7 +262,7 @@ function EditClientForm({
       fullName: client.fullName,
       phone: client.phone,
       email: client.email,
-      ibId: client.ibId,
+      ibId: client.ibId ?? "",
       status: client.status,
       split: { ...client.split },
       notes: client.notes ?? "",

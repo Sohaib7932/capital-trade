@@ -32,7 +32,7 @@ import {
   getMt5Positions,
   getSyncWarnings,
   resolveSyncWarning,
-  reviewCashEvent,
+  classifyCashEvent,
   updateMt5Account,
   type Mt5Position,
 } from "@/lib/api";
@@ -577,8 +577,8 @@ function CashEventsCard({ version }: { version: number }) {
             variant="outline"
             onClick={async () => {
               try {
-                await reviewCashEvent(e.accountLogin, e.dealTicket);
-                toast.success("Marked as reviewed");
+                await classifyCashEvent({ accountLogin: e.accountLogin, dealTicket: e.dealTicket, classification: e.suggestedClass });
+                toast.success("Classified");
                 setLocal((v) => v + 1);
               } catch (err) {
                 toast.error("Couldn't update", { description: errorText(err) });

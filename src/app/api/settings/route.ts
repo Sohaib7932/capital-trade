@@ -10,7 +10,10 @@ const timezones = new Set(Intl.supportedValuesOf("timeZone"));
 const updateSchema = z
   .object({
     defaultSplit: splitSchema.optional(),
-    lossHandling: z.enum(["carry_forward", "reset_monthly"]).optional(),
+    // Losses always carry forward; kept so older clients that send it don't break.
+    lossHandling: z.literal("carry_forward").optional(),
+    ibCommissionsEnabled: z.boolean().optional(),
+    syncIntervalSeconds: z.number().int().min(60, "At least 60 seconds").max(3600, "At most 1 hour").optional(),
     businessTimezone: z
       .string()
       .refine((tz) => timezones.has(tz), "Unknown timezone")

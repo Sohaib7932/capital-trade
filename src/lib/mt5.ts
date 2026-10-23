@@ -61,6 +61,12 @@ export function cashKind(dealType: number): string | null {
   return CASH_KINDS[dealType] ?? `type_${dealType}`;
 }
 
+/** First guess for a balance operation: balance deals by sign; everything else (credit, bonus, …) is ignored. */
+export function suggestCashClass(kind: string, amount: string): "deposit" | "withdrawal" | "ignore" {
+  if (kind !== "balance") return "ignore";
+  return amount.startsWith("-") ? "withdrawal" : "deposit";
+}
+
 export const CASH_KIND_LABELS: Record<string, string> = {
   balance: "Deposit / withdrawal",
   credit: "Credit",

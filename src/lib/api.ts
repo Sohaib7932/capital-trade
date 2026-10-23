@@ -6,6 +6,7 @@
  */
 import type {
   AdminProfile,
+  CashClass,
   CashEvent,
   DecimalString,
   ISODateTime,
@@ -46,9 +47,11 @@ import type {
 export class ApiError extends Error {
   constructor(
     message: string,
+    /** HTTP status; 0 = no response (network), 408 = timed out. */
     readonly status: number,
+    cause?: unknown,
   ) {
-    super(message);
+    super(message, { cause });
     this.name = "ApiError";
   }
 }
@@ -75,14 +78,47 @@ function redirectToLogin(path: string, status: number): void {
   }
 }
 
+/** A request that gets no answer within this time fails (and reads are retried). */
+const TIMEOUT_MS = 20_000;
+/** Reads are retried after these delays on network errors, timeouts and 502/503/504 (cold starts, deploys). */
+const RETRY_DELAYS_MS = [600, 2_000];
+const RETRYABLE_STATUS = new Set([502, 503, 504]);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchOnce(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: init.signal ?? controller.signal });
+  } catch (err) {
+    if (controller.signal.aborted) throw new ApiError("The server took too long to answer. Please try again.", 408);
+    throw new ApiError("Can't reach the server. Check your connection and try again.", 0, err);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchApi(path: string, init: RequestInit & { json?: unknown } = {}): Promise<Response> {
   const { json, ...rest } = init;
-  const res = await fetch(`${API_URL}${path}`, {
+  const requestInit: RequestInit = {
     ...rest,
     credentials: "include",
     headers: { ...(json !== undefined ? { "Content-Type": "application/json" } : {}), ...rest.headers },
     body: json !== undefined ? JSON.stringify(json) : rest.body,
-  });
+  };
+  // Only reads are retried: repeating a write could apply it twice.
+  const retries = (rest.method ?? "GET").toUpperCase() === "GET" ? RETRY_DELAYS_MS : [];
+  let res: Response | undefined;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetchOnce(`${API_URL}${path}`, requestInit);
+      if (!RETRYABLE_STATUS.has(res.status) || attempt >= retries.length) break;
+    } catch (err) {
+      if (attempt >= retries.length) throw err;
+    }
+    await sleep(retries[attempt]);
+  }
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { detail?: string } | null;
     redirectToLogin(path, res.status);
@@ -325,8 +361,13 @@ export function getCashEvents(query: { page?: number; pageSize?: number; unrevie
   return request(withQuery("/mt5/cash-events", { page: query.page, pageSize: query.pageSize, unreviewed: query.unreviewed ? "true" : undefined }));
 }
 
-export function reviewCashEvent(accountLogin: number, dealTicket: number): Promise<void> {
-  return request("/mt5/cash-events/review", { method: "POST", json: { accountLogin, dealTicket } });
+export function classifyCashEvent(input: {
+  accountLogin: number;
+  dealTicket: number;
+  classification: CashClass;
+  feeMonth?: MonthKey;
+}): Promise<void> {
+  return request("/mt5/cash-events/review", { method: "POST", json: input });
 }
 
 export function getSyncWarnings(): Promise<SyncWarning[]> {

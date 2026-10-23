@@ -121,7 +121,9 @@ export interface Client {
   fullName: string;
   phone: string;
   email: string;
-  ibId: string;
+  /** The introducing broker, or null for a Direct (company) client. */
+  ibId: string | null;
+  /** IB name, or "Direct". */
   ibName: string;
   /** Current capital: always derived from deposits minus withdrawals. */
   investedCapital: DecimalString;
@@ -188,7 +190,8 @@ export interface CreateClientInput {
   fullName: string;
   phone: string;
   email: string;
-  ibId: string;
+  /** Null = Direct client. */
+  ibId: string | null;
   investedAmount: DecimalString;
   investmentDate: ISODate;
   split: SplitPercent;
@@ -199,7 +202,8 @@ export interface UpdateClientInput {
   fullName: string;
   phone: string;
   email: string;
-  ibId: string;
+  /** Null = Direct client. */
+  ibId: string | null;
   status: ClientStatus;
   split: SplitPercent;
   notes?: string;
@@ -209,6 +213,7 @@ export type ClientSortKey = "fullName" | "ibName" | "investedCapital" | "joinedA
 
 export interface ClientQuery {
   search?: string;
+  /** An IB id, or "direct" for clients without an IB. */
   ibId?: string;
   status?: ClientStatus;
   /** Month used for `monthProfit`. Defaults to the latest month. */
@@ -304,7 +309,7 @@ export interface ClientSplitRow extends SplitAmounts {
   clientId: string;
   clientCode: string;
   clientName: string;
-  ibId: string;
+  ibId: string | null;
   ibName: string;
   /** Average active capital across the month's trading days. */
   capital: DecimalString;
@@ -390,9 +395,18 @@ export interface Mt5Account {
   /** Null = the pooled account shared by all clients. */
   linkedClientId: string | null;
   linkedClientName: string | null;
+  /** The broker server type, as MT5 reports it once synced. */
+  environment: "live" | "demo";
+  currency: string | null;
+  leverage: number | null;
+  /** An investor password is stored (encrypted). The password itself is never sent to the UI. */
+  passwordSet: boolean;
+  syncState: Mt5SyncState;
   lastSyncAt: ISODateTime | null;
   lastSyncStatus: "ok" | "error" | null;
   lastError: string | null;
+  /** "auth" = MT5 rejected the investor password or server. */
+  lastErrorKind: "auth" | "other" | null;
   balance: DecimalString | null;
   equity: DecimalString | null;
   margin: DecimalString | null;
@@ -401,6 +415,14 @@ export interface Mt5Account {
   health: SyncHealth;
 }
 
+/**
+ * - `paused`: not synced (inactive).
+ * - `no_password`: no investor password stored yet.
+ * - `waiting`: never synced yet ("Waiting for first sync").
+ * - `ok` / `error`: result of the last attempt.
+ */
+export type Mt5SyncState = "paused" | "no_password" | "waiting" | "ok" | "error";
+
 export interface Mt5AccountInput {
   label: string;
   login: number;
@@ -408,17 +430,36 @@ export interface Mt5AccountInput {
   brokerTimezoneOffsetMinutes: number;
   isActive: boolean;
   linkedClientId: string | null;
+  /** Write-only. Omit to keep the stored one. */
+  investorPassword?: string;
 }
+
+/**
+ * How a balance operation counts:
+ * - `deposit` / `withdrawal`: changes the client's capital.
+ * - `fee_payment`: the client paying the trader/company share of a month; not capital.
+ * - `ignore`: counts for nothing (credit, bonus, broker corrections, …).
+ */
+export type CashClass = "deposit" | "withdrawal" | "fee_payment" | "ignore";
 
 /** A balance operation from MT5 (deposit, credit, bonus, charge, …). Never trading profit. */
 export interface CashEvent {
   accountLogin: number;
   accountLabel: string;
+  /** The account's client; null for a pooled account. */
+  clientId: string | null;
+  clientName: string | null;
   dealTicket: number;
   time: ISODateTime;
   kind: string;
   amount: DecimalString;
   comment: string | null;
+  /** Suggested from the deal type and sign until an admin confirms. */
+  suggestedClass: CashClass;
+  /** Null = needs review. */
+  classification: CashClass | null;
+  /** For a fee payment: the month whose fee it pays. */
+  feeMonth: MonthKey | null;
   reviewedAt: ISODateTime | null;
   reviewedBy: string | null;
 }
@@ -458,6 +499,10 @@ export interface AdminProfile {
 export interface Settings {
   defaultSplit: SplitPercent;
   lossHandling: LossHandling;
+  /** IB commissions are calculated and shown only when on (off until the rule is decided). */
+  ibCommissionsEnabled: boolean;
+  /** How often the worker syncs every account. */
+  syncIntervalSeconds: number;
   /** IANA zone that defines a business "day", e.g. "Asia/Karachi". */
   businessTimezone: string;
   /** MT5 symbols that count as pool (gold) trading; matched ignoring case and broker suffixes. */
@@ -471,6 +516,8 @@ export interface SettingsUpdate {
   lossHandling?: LossHandling;
   businessTimezone?: string;
   goldSymbols?: string[];
+  ibCommissionsEnabled?: boolean;
+  syncIntervalSeconds?: number;
   profile?: Pick<AdminProfile, "name" | "email">;
 }
 

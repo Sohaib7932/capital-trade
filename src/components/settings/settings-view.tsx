@@ -18,7 +18,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { changePassword, updateProfile, updateSettings } from "@/lib/api";
 import { timeZoneLabel } from "@/lib/dates";
 import { normalizeSymbol } from "@/lib/symbols";
-import type { LossHandling, Settings } from "@/lib/types";
+import type { Settings } from "@/lib/types";
 import { emailSchema, passwordSchema, splitSchema } from "@/lib/validation";
 import { AuditPanel } from "./audit-panel";
 import { Mt5Panel } from "./mt5-panel";
@@ -68,7 +68,7 @@ export function SettingsView() {
         </TabsList>
         <TabsContent value="split" className="space-y-6">
           <SplitSettings settings={settings} />
-          <LossHandlingSettings settings={settings} />
+          <LossHandlingSettings />
           <TimezoneSettings settings={settings} />
         </TabsContent>
         <TabsContent value="mt5" className="space-y-6">
@@ -176,60 +176,17 @@ function SplitSettings({ settings }: { settings: Settings }) {
 
 // --- Losing months ----------------------------------------------------------
 
-const LOSS_OPTIONS: { value: LossHandling; title: string; description: string }[] = [
-  {
-    value: "carry_forward",
-    title: "Carry forward (recommended)",
-    description: "A client's loss is carried into the next months. No trader, company or IB share is taken until it is fully recovered.",
-  },
-  {
-    value: "reset_monthly",
-    title: "Reset every month",
-    description: "Each month stands alone. A losing month pays no shares, and the next month starts fresh.",
-  },
-];
-
-const lossForm = z.object({ lossHandling: z.enum(["carry_forward", "reset_monthly"]) });
-
-function LossHandlingSettings({ settings }: { settings: Settings }) {
-  const { canEdit } = useApp();
-  const save = useSaveSettings();
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { isSubmitting, isDirty },
-  } = useForm<z.infer<typeof lossForm>>({ resolver: zodResolver(lossForm), defaultValues: { lossHandling: settings.lossHandling } });
-
-  async function onSubmit(values: z.infer<typeof lossForm>) {
-    const saved = await save(
-      { lossHandling: values.lossHandling },
-      "Loss handling saved",
-      "Applies to open months; finalized months keep theirs.",
-    );
-    if (saved) reset({ lossHandling: saved.lossHandling });
-  }
-
+/** Losses always carry forward per client; shown for reference. */
+function LossHandlingSettings() {
   return (
-    <SettingsCard title="Losing months" description="What happens when a client's share of the month is a loss.">
-      <form onSubmit={handleSubmit(onSubmit)} noValidate>
-        <fieldset disabled={!canEdit} className="space-y-3 px-6 py-5">
-          <legend className="sr-only">Loss handling</legend>
-          {LOSS_OPTIONS.map((option) => (
-            <label
-              key={option.value}
-              className="flex cursor-pointer gap-3 rounded-xl border p-4 has-checked:border-gold has-checked:bg-gold-soft/50"
-            >
-              <input type="radio" value={option.value} className="mt-1 size-4 accent-gold" {...register("lossHandling")} />
-              <span>
-                <span className="block text-sm font-semibold">{option.title}</span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">{option.description}</span>
-              </span>
-            </label>
-          ))}
-        </fieldset>
-        {canEdit ? <SaveBar submitting={isSubmitting} dirty={isDirty} /> : null}
-      </form>
+    <SettingsCard title="Losing months" description="What happens when a client's month is a loss.">
+      <div className="px-6 py-5 text-sm">
+        <p className="font-semibold">Losses carry forward per client</p>
+        <p className="mt-1 text-muted-foreground">
+          If a client&apos;s result since their last split is negative, nothing is split. When profit comes back, the loss is
+          recovered first and only the profit above it is split (e.g. October −300, November +1,000 → November splits 700).
+        </p>
+      </div>
     </SettingsCard>
   );
 }

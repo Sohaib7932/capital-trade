@@ -86,6 +86,9 @@ export const tradeFilterSchema = z.object({
   type: z.enum(["buy", "sell"]).optional(),
 });
 
+/** Write-only: encrypted on arrival, never stored or logged in plain text. Not trimmed (spaces may be part of it). */
+export const investorPasswordSchema = z.string().min(1, "Enter the investor password").max(64, "At most 64 characters");
+
 export const mt5AccountSchema = z.object({
   label: z.string().trim().min(2, "Give the account a name").max(80),
   login: z.number({ error: "Enter the MT5 login number" }).int().positive("Enter the MT5 login number").max(Number.MAX_SAFE_INTEGER),
@@ -97,4 +100,6 @@ export const mt5AccountSchema = z.object({
     .max(840, "Between −720 and 840"),
   isActive: z.boolean(),
   linkedClientId: z.string().max(40).nullable(),
+  /** Omit to keep the current password. */
+  investorPassword: investorPasswordSchema.optional(),
 });

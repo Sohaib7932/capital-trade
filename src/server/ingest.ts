@@ -1,7 +1,7 @@
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { monthOf, toISODate } from "@/lib/dates";
-import { cashKind, DEAL_TYPE } from "@/lib/mt5";
+import { cashKind, DEAL_TYPE, suggestCashClass } from "@/lib/mt5";
 import { isGoldSymbol, normalizeSymbol } from "@/lib/symbols";
 import type { IngestCounts, IngestResult, MonthKey } from "@/lib/types";
 import { recomputeMonths, type Queryable } from "./allocations";
@@ -53,7 +53,16 @@ const positionSchema = z.object({
 export const ingestSchema = z.object({
   account_login: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   server: z.string().trim().min(1).max(100),
-  account: z.object({ balance: money, equity: money, margin: money, profit: money }),
+  account: z.object({
+    balance: money,
+    equity: money,
+    margin: money,
+    profit: money,
+    currency: z.string().trim().max(10).optional(),
+    leverage: z.number().int().nonnegative().max(100_000).optional(),
+    /** ACCOUNT_TRADE_MODE: 0 demo, 1 contest, 2 real. */
+    trade_mode: z.number().int().min(0).max(2).optional(),
+  }),
   positions: z.array(positionSchema).max(10_000),
   deals: z.array(dealSchema).max(200_000),
   /** Broker offset from UTC the worker measured from a fresh tick; null when the market is closed. */
@@ -179,25 +188,32 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
 
   // 2. Balance operations, kept apart from trading profit for review.
   const { rows: cashRows } = await db.query<{ inserted: boolean }>(
-    `INSERT INTO account_cash_events AS c (account_login, deal_ticket, time, deal_type, kind, amount, comment)
-     SELECT $1, ticket, time, deal_type, kind, amount, comment
-       FROM jsonb_to_recordset($2::jsonb) AS t(ticket bigint, time timestamptz, deal_type smallint, kind text, amount numeric, comment text)
+    `INSERT INTO account_cash_events AS c (account_login, deal_ticket, time, deal_type, kind, amount, comment, suggested_class)
+     SELECT $1, ticket, time, deal_type, kind, amount, comment, suggested_class
+       FROM jsonb_to_recordset($2::jsonb) AS t(ticket bigint, time timestamptz, deal_type smallint, kind text, amount numeric, comment text,
+            suggested_class text)
      ON CONFLICT (account_login, deal_ticket) DO UPDATE SET
-       time = EXCLUDED.time, deal_type = EXCLUDED.deal_type, kind = EXCLUDED.kind, amount = EXCLUDED.amount, comment = EXCLUDED.comment
+       time = EXCLUDED.time, deal_type = EXCLUDED.deal_type, kind = EXCLUDED.kind, amount = EXCLUDED.amount, comment = EXCLUDED.comment,
+       suggested_class = EXCLUDED.suggested_class
      WHERE (c.time, c.deal_type, c.amount, c.comment) IS DISTINCT FROM (EXCLUDED.time, EXCLUDED.deal_type, EXCLUDED.amount, EXCLUDED.comment)
      RETURNING (xmax = 0) AS inserted`,
     [
       login,
       JSON.stringify(
-        cash.map((d) => ({
-          ticket: d.ticket,
-          time: serverTimeToUtc(d.time, d.time_msc, offset),
-          deal_type: d.type,
-          kind: cashKind(d.type),
+        cash.map((d) => {
+          const kind = cashKind(d.type)!;
           // A balance deal's amount is in `profit`; costs may also show in commission/fee.
-          amount: new Decimal(d.profit).plus(d.commission).plus(d.fee).plus(d.swap).toFixed(2),
-          comment: d.comment ?? null,
-        })),
+          const amount = new Decimal(d.profit).plus(d.commission).plus(d.fee).plus(d.swap).toFixed(2);
+          return {
+            ticket: d.ticket,
+            time: serverTimeToUtc(d.time, d.time_msc, offset),
+            deal_type: d.type,
+            kind,
+            amount,
+            comment: d.comment ?? null,
+            suggested_class: suggestCashClass(kind, amount),
+          };
+        }),
       ),
     ],
   );
@@ -266,9 +282,11 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
   }
 
   // 7. Account status.
+  const { currency, leverage, trade_mode } = payload.account;
   await db.query(
-    `UPDATE mt5_accounts SET balance = $2, equity = $3, margin = $4, floating_pl = $5, last_sync_at = $6,
-            last_sync_status = 'ok', last_error = NULL, detected_offset_minutes = $7
+    `UPDATE mt5_accounts SET balance = $2, equity = $3, margin = $4, floating_pl = $5, last_sync_at = $6, last_attempt_at = $6,
+            last_sync_status = 'ok', last_error = NULL, last_error_kind = NULL, detected_offset_minutes = $7,
+            currency = COALESCE($8, currency), leverage = COALESCE($9, leverage), environment = COALESCE($10, environment)
       WHERE login = $1`,
     [
       login,
@@ -278,6 +296,9 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
       payload.account.profit,
       now.toISOString(),
       detected ?? null,
+      currency || null,
+      leverage ?? null,
+      trade_mode === undefined ? null : trade_mode === 2 ? "live" : "demo",
     ],
   );
 
@@ -291,11 +312,40 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
   };
 }
 
-/** Record a failed sync reported by the worker (e.g. MT5 login failed). */
-export async function recordSyncError(db: Queryable, login: number, message: string): Promise<boolean> {
+export type SyncErrorKind = "auth" | "other";
+
+/** Record a failed sync reported by the worker. `auth` = wrong investor password or server. */
+export async function recordSyncError(db: Queryable, login: number, message: string, kind: SyncErrorKind = "other"): Promise<boolean> {
   const { rows } = await db.query<{ login: string }>(
-    "UPDATE mt5_accounts SET last_sync_status = 'error', last_error = $2 WHERE login = $1 RETURNING login::text",
-    [login, message.slice(0, 1000)],
+    `UPDATE mt5_accounts SET last_sync_status = 'error', last_error = $2, last_error_kind = $3, last_attempt_at = now()
+      WHERE login = $1 RETURNING login::text`,
+    [login, message.slice(0, 1000), kind],
   );
   return rows.length > 0;
+}
+
+export interface SyncAccount {
+  login: number;
+  server: string;
+  label: string;
+  /** "v1.<key id>.<base64>"; only the worker's private key can decrypt it. */
+  encrypted_password: string;
+}
+
+/**
+ * What the worker syncs: active, real accounts with an investor password. The
+ * password goes out exactly as stored (ciphertext); the worker decrypts locally.
+ */
+export async function listSyncAccounts(db: Queryable): Promise<{ sync_interval_seconds: number; accounts: SyncAccount[] }> {
+  const { rows } = await db.query<{ sync_interval_seconds: number; accounts: (Omit<SyncAccount, "login"> & { login: string })[] | null }>(
+    `SELECT (SELECT sync_interval_seconds FROM settings WHERE id = 1) AS sync_interval_seconds,
+            (SELECT json_agg(r ORDER BY r.login) FROM (
+               SELECT login::text AS login, server, label, investor_password_enc AS encrypted_password
+                 FROM mt5_accounts
+                WHERE is_active AND NOT is_demo AND investor_password_enc IS NOT NULL) r) AS accounts`,
+  );
+  return {
+    sync_interval_seconds: rows[0]?.sync_interval_seconds ?? 300,
+    accounts: (rows[0]?.accounts ?? []).map((a) => ({ ...a, login: Number(a.login) })),
+  };
 }
