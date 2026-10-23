@@ -1,10 +1,11 @@
 /**
  * Prepare a database for real use.
  *
- *   npm run db:clear-demo                      # remove seeded demo trades only (also happens automatically on the first real sync)
- *   npm run db:clear-demo -- --everything --yes # remove ALL business data: clients, IBs, transactions, months, payouts, trades
+ *   npm run db:clear-demo                      # remove seeded demo trades only
+ *   npm run db:clear-demo -- --everything --yes # remove ALL business data: clients, IBs, transactions, months, payouts, demo trades
  *
- * Users, settings and real MT5 accounts are always kept. To keep a demo to play
+ * Users, settings, real MT5 accounts and the deals synced from them are always kept;
+ * open months are rebuilt from the real deals. To keep a demo to play
  * with, seed a separate Neon branch instead (see README → Demo data).
  */
 import { Client } from "pg";
@@ -26,11 +27,16 @@ async function main() {
     await client.query("BEGIN");
     if (everything) {
       await client.query("UPDATE mt5_accounts SET linked_client_id = NULL");
-      await client.query(
-        "TRUNCATE settlements, daily_allocations, daily_pnl, payouts, months, transactions, clients, ibs, mt5_deals, mt5_positions, account_cash_events, sync_warnings",
+      await client.query("TRUNCATE settlements, daily_allocations, daily_pnl, payouts, months, transactions");
+      // mt5_accounts references clients, so these can't be truncated.
+      await client.query("DELETE FROM clients");
+      await client.query("DELETE FROM ibs");
+      await client.query("DELETE FROM mt5_accounts WHERE is_demo"); // cascades to its deals
+      await client.query("DELETE FROM sync_warnings WHERE account_login NOT IN (SELECT login FROM mt5_accounts)");
+      const months = await recomputeMonths(client, { today: monthOf(toISODate(new Date())) });
+      console.log(
+        `All business data removed; users, settings, real MT5 accounts and their synced deals were kept. Rebuilt ${months.join(", ") || "no months"}.`,
       );
-      await client.query("DELETE FROM mt5_accounts WHERE is_demo");
-      console.log("All business data removed. Users, settings and real MT5 accounts were kept.");
     } else {
       const { rowCount } = await client.query("DELETE FROM mt5_accounts WHERE is_demo");
       const months = await recomputeMonths(client, { today: monthOf(toISODate(new Date())) });
