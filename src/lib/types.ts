@@ -460,6 +460,8 @@ export interface Settings {
   lossHandling: LossHandling;
   /** IANA zone that defines a business "day", e.g. "Asia/Karachi". */
   businessTimezone: string;
+  /** MT5 symbols that count as pool (gold) trading; matched ignoring case and broker suffixes. */
+  goldSymbols: string[];
   mt5: Mt5Summary;
   profile: AdminProfile;
 }
@@ -468,6 +470,7 @@ export interface SettingsUpdate {
   defaultSplit?: SplitPercent;
   lossHandling?: LossHandling;
   businessTimezone?: string;
+  goldSymbols?: string[];
   profile?: Pick<AdminProfile, "name" | "email">;
 }
 

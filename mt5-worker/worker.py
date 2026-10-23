@@ -28,7 +28,7 @@ from typing import Any
 import requests
 from dotenv import load_dotenv
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 STATE_FILE = BASE_DIR / "state.json"
 ACCOUNTS_FILE = BASE_DIR / "accounts.json"
@@ -204,6 +204,14 @@ def detect_offset_minutes(mt5, symbols: list[str]) -> int | None:
     return None
 
 
+def clock_symbols(mt5, seen: list[str]) -> list[str]:
+    """Symbols to read the broker clock from: the broker's own gold symbol names first
+    (any case or suffix, e.g. "xauusd", "XAUUSDm"), then symbols seen in positions/deals."""
+    names = [s.name for s in (mt5.symbols_get() or ())]
+    gold = [n for n in names if n.upper().startswith(("XAUUSD", "GOLD"))][:3]
+    return (gold + [s for s in seen if s not in gold])[:5] or ["XAUUSD"]
+
+
 def as_dict(row: Any) -> dict[str, Any]:
     return row._asdict() if hasattr(row, "_asdict") else dict(row)
 
@@ -325,8 +333,8 @@ def sync_account(mt5, cfg: Config, account: Account, state: State, session: requ
         if deals is None:
             code, message = mt5.last_error()
             raise Mt5Error(f"history_deals_get failed: [{code}] {message}")
-        symbols = sorted({p.symbol for p in positions} | {d.symbol for d in deals if d.symbol}) or ["XAUUSD"]
-        offset = detect_offset_minutes(mt5, symbols[:5])
+        seen = sorted({p.symbol for p in positions} | {d.symbol for d in deals if d.symbol})
+        offset = detect_offset_minutes(mt5, clock_symbols(mt5, seen))
         payload = build_payload(account, info, positions, deals, offset)
     finally:
         mt5.shutdown()
@@ -379,7 +387,7 @@ def test_connection(cfg: Config) -> bool:
         try:
             mt5_login(mt5, cfg, account)
             info = mt5.account_info()
-            offset = detect_offset_minutes(mt5, ["XAUUSD"])
+            offset = detect_offset_minutes(mt5, clock_symbols(mt5, []))
             print(
                 f"OK  {account.label} ({info.login} @ {info.server}, {info.company}): "
                 f"balance {info.balance:,.2f} {info.currency}, equity {info.equity:,.2f}, "

@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { changePassword, updateProfile, updateSettings } from "@/lib/api";
 import { timeZoneLabel } from "@/lib/dates";
+import { normalizeSymbol } from "@/lib/symbols";
 import type { LossHandling, Settings } from "@/lib/types";
 import { emailSchema, passwordSchema, splitSchema } from "@/lib/validation";
 import { AuditPanel } from "./audit-panel";
@@ -70,8 +71,9 @@ export function SettingsView() {
           <LossHandlingSettings settings={settings} />
           <TimezoneSettings settings={settings} />
         </TabsContent>
-        <TabsContent value="mt5">
+        <TabsContent value="mt5" className="space-y-6">
           <Mt5Panel />
+          <GoldSymbolsSettings settings={settings} />
         </TabsContent>
         <TabsContent value="profile" className="space-y-6">
           <ProfileSettings settings={settings} />
@@ -296,6 +298,66 @@ function TimezoneSettings({ settings }: { settings: Settings }) {
             </select>
           </FormField>
           <p className="text-xs text-muted-foreground">Changing it recalculates open months only. Finalized months keep their days.</p>
+        </fieldset>
+        {canEdit ? <SaveBar submitting={isSubmitting} dirty={isDirty} /> : null}
+      </form>
+    </SettingsCard>
+  );
+}
+
+// --- Gold symbols ----------------------------------------------------------------
+
+const goldForm = z.object({
+  symbols: z
+    .string()
+    .transform((v) => [...new Set(v.split(/[\s,]+/).map(normalizeSymbol).filter(Boolean))])
+    .pipe(
+      z
+        .array(z.string().regex(/^[A-Z0-9._#+!-]{2,32}$/, "Symbols are 2–32 letters, digits or . _ # + ! -"))
+        .min(1, "Keep at least one gold symbol")
+        .max(20, "At most 20 symbols"),
+    ),
+});
+
+function GoldSymbolsSettings({ settings }: { settings: Settings }) {
+  const { canEdit } = useApp();
+  const save = useSaveSettings();
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isSubmitting, isDirty },
+  } = useForm<z.input<typeof goldForm>, unknown, z.output<typeof goldForm>>({
+    resolver: zodResolver(goldForm),
+    defaultValues: { symbols: settings.goldSymbols.join(", ") },
+  });
+
+  async function onSubmit(values: z.output<typeof goldForm>) {
+    const saved = await save({ goldSymbols: values.symbols }, "Gold symbols saved", "Open months were recalculated.");
+    if (saved) reset({ symbols: saved.goldSymbols.join(", ") });
+  }
+
+  return (
+    <SettingsCard
+      title="Gold symbols"
+      description="Only trades on these symbols count as pool profit. Matching ignores case and broker suffixes, so XAUUSD also matches xauusd, XAUUSDm, XAUUSD.r and XAUUSD.pro."
+    >
+      <form onSubmit={handleSubmit(onSubmit)} noValidate>
+        <fieldset disabled={!canEdit} className="space-y-3 px-6 py-5">
+          <FormField id="gold-symbols" label="Symbols" error={errors.symbols?.message} hint="Comma-separated, e.g. XAUUSD, GOLD">
+            <Input
+              id="gold-symbols"
+              autoComplete="off"
+              spellCheck={false}
+              aria-invalid={Boolean(errors.symbols)}
+              aria-describedby={describedBy("gold-symbols", errors.symbols?.message, true)}
+              {...register("symbols")}
+            />
+          </FormField>
+          <p className="text-xs text-muted-foreground">
+            Deals on other symbols are still stored but never counted; the sync raises a warning when one arrives. Changing this
+            recalculates open months only.
+          </p>
         </fieldset>
         {canEdit ? <SaveBar submitting={isSubmitting} dirty={isDirty} /> : null}
       </form>

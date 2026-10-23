@@ -6,21 +6,22 @@ export interface Queryable {
 }
 
 /**
- * Trading deals of active accounts within `month` (business timezone), with
- * their business day. $1 = month, $2 = timezone.
+ * Gold trading deals of active accounts within `month` (business timezone),
+ * with their business day. Other symbols never count. $1 = month, $2 = timezone.
  */
 const MONTH_DEALS = `
   SELECT dl.*, (dl.time AT TIME ZONE $2)::date AS day, a.linked_client_id
     FROM mt5_deals dl
     JOIN mt5_accounts a ON a.login = dl.account_login AND a.is_active
-   WHERE dl.time >= ((($1 || '-01')::date)::timestamp AT TIME ZONE $2)
+   WHERE is_gold_symbol(dl.symbol, gold_symbols())
+     AND dl.time >= ((($1 || '-01')::date)::timestamp AT TIME ZONE $2)
      AND dl.time <  (((($1 || '-01')::date) + interval '1 month')::timestamp AT TIME ZONE $2)`;
 
 /**
  * Rebuild `daily_pnl` and `daily_allocations` for one month. Run inside a
  * transaction. Callers decide which months may change (open months only).
  *
- * - Day net = profit + swap + commission + fee of every trading deal that day
+ * - Day net = profit + swap + commission + fee of every gold trading deal that day
  *   (profit only appears on closing deals; entry commissions count on their day).
  * - Lots = volume of opening (IN) deals, so a round trip isn't counted twice.
  * - Pooled accounts: the day's net is shared by each client's active capital.

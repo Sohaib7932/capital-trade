@@ -38,7 +38,10 @@ Rules: trading profit = profit + swap + commission + fee of the BUY/SELL deals (
 deals; entry commissions count on their own day). Lots = volume of opening deals, so a round trip isn't counted twice.
 Balance operations (deposits, credit, bonus, charges) go to **account cash events** for review — never profit, never a
 client transaction. Trades on the Trades page are deals grouped by position. Deals that arrive for a **finalized** month
-are stored but change nothing; admins see a banner. Seeded demo trades are removed automatically on the first real sync.
+are stored but change nothing; admins see a banner. Only **gold symbols** count (Settings → MT5 Connection, default
+`XAUUSD`, `GOLD`): matching ignores case and broker suffixes (`xauusd`, `XAUUSDm`, `XAUUSD.r`, `GOLD.pro`); deals on
+other symbols are stored, flagged with a warning, and never counted. Symbols are stored and shown upper-case. Seeded
+demo trades stay until you run `npm run db:clear-demo`.
 
 Test the whole pipeline without MT5:
 
@@ -104,6 +107,7 @@ npm run user:create -- --email owner@example.com --name "Owner" --role admin
 | `npm run db:recompute` | Rebuild daily allocations for open months (`-- --all` includes finalized; first backfill only) |
 | `npm run user:create` | Create a user or reset a password |
 | `npm run example` | Print the worked allocation example |
+| `npm run mt5:account` | Register or update an MT5 account (`-- --login … --server … --label … --offset 180`) |
 | `npm run mt5:send-fake` | Post fake MT5 deals to the ingest endpoint (`--register`, `--url`, `--locked-month`) |
 | `npm run db:clear-demo` | Remove demo trades (`-- --everything --yes` removes all business data) |
 

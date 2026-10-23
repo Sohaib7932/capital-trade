@@ -214,7 +214,7 @@ export function Mt5Panel() {
         </div>
         {settings?.mt5.demoData ? (
           <p className="border-b bg-gold-soft/60 px-6 py-3 text-xs text-gold-ink">
-            Demo trades are loaded. They are removed automatically the first time a real account syncs.
+            Demo trades are loaded and count alongside synced trades. Remove them with npm run db:clear-demo when you go live.
           </p>
         ) : null}
         {accounts ? (

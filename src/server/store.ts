@@ -2,6 +2,7 @@ import Decimal from "decimal.js";
 import { formatCurrency, isValidSplit, percentChange, toDecimal, toMoney } from "@/lib/calculations";
 import { formatMonth, monthOf, toISODate } from "@/lib/dates";
 import { syncHealth } from "@/lib/mt5";
+import { normalizeSymbol } from "@/lib/symbols";
 import type {
   ClientDetail,
   CreateClientInput,
@@ -117,7 +118,7 @@ SELECT
             split_company::text, split_client::text, ib_percent::text, ib_source, gross::text, carry_in::text,
             carry_out::text, trader::text, company::text, client::text, ib::text FROM settlements) r) AS settlements,
   (SELECT row_to_json(r) FROM (
-     SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone
+     SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols
        FROM settings WHERE id = 1) r) AS settings,
   ${MT5_SUMMARY_SQL} AS mt5`;
 
@@ -372,6 +373,7 @@ export async function getGoldSpot(): Promise<GoldSpot> {
 type SettingsRow = SplitColumns & {
   loss_handling: LossHandling;
   business_timezone: string;
+  gold_symbols: string[];
 };
 
 interface Mt5SummaryRow {
@@ -390,6 +392,7 @@ function toSettings(row: SettingsRow | null | undefined, mt5: Mt5SummaryRow, now
     defaultSplit: toSplit(row),
     lossHandling: row.loss_handling,
     businessTimezone: row.business_timezone,
+    goldSymbols: row.gold_symbols,
     mt5: {
       accounts: mt5.accounts,
       lastSyncAt: mt5.last_sync_at,
@@ -403,7 +406,7 @@ function toSettings(row: SettingsRow | null | undefined, mt5: Mt5SummaryRow, now
 async function loadSettingsRow(db: Queryable = pool()): Promise<Omit<Settings, "profile">> {
   const { rows } = await db.query<{ settings: SettingsRow | null; mt5: Mt5SummaryRow }>(
     `SELECT (SELECT row_to_json(r) FROM (
-               SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone
+               SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols
                  FROM settings WHERE id = 1) r) AS settings,
             ${MT5_SUMMARY_SQL} AS mt5`,
   );
@@ -883,6 +886,15 @@ export async function updateSettings(user: SessionUser, update: SettingsUpdate):
       await tx.query("UPDATE settings SET business_timezone = $1 WHERE id = 1", [update.businessTimezone]);
       // Day boundaries moved: rebuild the open months' daily rows.
       await recomputeOpenMonths(tx);
+    }
+    if (update.goldSymbols) {
+      const gold = [...new Set(update.goldSymbols.map(normalizeSymbol).filter(Boolean))];
+      if (!gold.length) throw badRequest("Keep at least one gold symbol");
+      if (gold.join() !== before.goldSymbols.join()) {
+        await tx.query("UPDATE settings SET gold_symbols = $1 WHERE id = 1", [gold]);
+        // Which deals count as profit changed: rebuild the open months.
+        await recomputeOpenMonths(tx);
+      }
     }
     if (update.profile) {
       const taken = await tx.query("SELECT 1 FROM admin_users WHERE lower(email) = lower($1) AND id <> $2", [update.profile.email, user.id]);

@@ -97,7 +97,7 @@ async function seedData(client: Client, reset: boolean) {
       data.transactions.map((t) => ({ ...t, client_id: t.clientId })),
     );
     // Demo trades are stored as MT5 deals (an opening and a closing deal each) under a demo account,
-    // exactly like synced data. They're removed automatically when a real account syncs.
+    // exactly like synced data. Remove them with `npm run db:clear-demo`.
     await client.query(
       `INSERT INTO mt5_accounts (id, label, login, server, is_demo, last_sync_at, last_sync_status)
        VALUES ('mt5-demo', 'Demo data', 0, 'demo', true, now(), 'ok')`,

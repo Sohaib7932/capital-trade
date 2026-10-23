@@ -2,6 +2,7 @@ import Decimal from "decimal.js";
 import { z } from "zod";
 import { monthOf, toISODate } from "@/lib/dates";
 import { cashKind, DEAL_TYPE } from "@/lib/mt5";
+import { isGoldSymbol, normalizeSymbol } from "@/lib/symbols";
 import type { IngestCounts, IngestResult, MonthKey } from "@/lib/types";
 import { recomputeMonths, type Queryable } from "./allocations";
 import { badRequest, conflict, notFound } from "./errors";
@@ -100,7 +101,8 @@ function counts(total: number, returned: { inserted: boolean }[]): IngestCounts 
  * (account_login, deal_ticket) and unchanged deals are ignored, so the worker
  * can safely resend overlapping windows. Run inside a transaction.
  *
- * - BUY/SELL deals → `mt5_deals` (trading P/L).
+ * - BUY/SELL deals → `mt5_deals` (trading P/L). Symbols are stored upper-case; only
+ *   gold symbols (Settings → MT5 Connection) count as profit, others raise a warning.
  * - Balance operations (deposits, credit, bonus, charges, …) → `account_cash_events`,
  *   never trading profit, never client transactions.
  * - Open positions replace the account's previous snapshot.
@@ -132,7 +134,7 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
   const skipped = payload.deals.length - trading.length - cash.length;
 
   // 1. Trading deals. Only new or changed rows come back from RETURNING.
-  const { rows: dealRows } = await db.query<{ inserted: boolean; month: string }>(
+  const { rows: dealRows } = await db.query<{ inserted: boolean; month: string; symbol: string }>(
     `INSERT INTO mt5_deals AS d (account_login, deal_ticket, order_ticket, position_id, time, type, entry, symbol, volume,
                                  price, profit, swap, commission, fee, magic, comment)
      SELECT $1, ticket, order_ticket, position_id, time, type, entry, symbol, volume, price, profit, swap, commission, fee, magic, comment
@@ -148,7 +150,7 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
            IS DISTINCT FROM
            (EXCLUDED.position_id, EXCLUDED.time, EXCLUDED.type, EXCLUDED.entry, EXCLUDED.symbol, EXCLUDED.volume,
             EXCLUDED.price, EXCLUDED.profit, EXCLUDED.swap, EXCLUDED.commission, EXCLUDED.fee)
-     RETURNING (xmax = 0) AS inserted,
+     RETURNING (xmax = 0) AS inserted, d.symbol,
                to_char(d.time AT TIME ZONE (SELECT business_timezone FROM settings WHERE id = 1), 'YYYY-MM') AS month`,
     [
       login,
@@ -160,7 +162,7 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
           time: serverTimeToUtc(d.time, d.time_msc, offset),
           type: d.type,
           entry: d.entry,
-          symbol: d.symbol,
+          symbol: normalizeSymbol(d.symbol),
           volume: d.volume,
           price: d.price,
           profit: d.profit,
@@ -213,7 +215,7 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
         JSON.stringify(
           payload.positions.map((p) => ({
             ticket: p.ticket,
-            symbol: p.symbol,
+            symbol: normalizeSymbol(p.symbol),
             type: p.type === 0 ? "buy" : "sell",
             volume: p.volume,
             open_time: serverTimeToUtc(p.time, undefined, offset),
@@ -227,11 +229,14 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
     );
   }
 
-  // 4. Demo data goes away as soon as a real account delivers data.
-  const { rows: demo } = await db.query<{ login: string }>("DELETE FROM mt5_accounts WHERE is_demo RETURNING login::text");
-  if (demo.length) {
-    warnings.push("Demo trades were removed now that a real MT5 account is syncing.");
-    await upsertWarning(db, login, "demo_removed", "", "Seeded demo trades were removed when real MT5 data first arrived. Finalized demo months keep their frozen numbers.", 1);
+  // 4. Deals on other symbols are stored but never count as pool profit.
+  const { rows: goldRows } = await db.query<{ gold: string[] }>("SELECT gold_symbols() AS gold");
+  const other = dealRows.filter((r) => !isGoldSymbol(r.symbol, goldRows[0].gold));
+  if (other.length) {
+    const symbols = [...new Set(other.map((r) => r.symbol || "(none)"))].sort().join(", ");
+    const message = `${other.length} deal${other.length === 1 ? "" : "s"} on ${symbols} didn't count as pool profit: not a gold symbol. Add it under Gold symbols in Settings → MT5 Connection if it should count.`;
+    warnings.push(message);
+    await upsertWarning(db, login, "non_gold_symbols", "", message, other.length);
   }
 
   // 5. Recalculate open months touched by new/changed deals; never touch finalized ones.
@@ -250,12 +255,7 @@ export async function ingestMt5(db: Queryable, payload: IngestPayload, now: Date
   }
   const today = monthOf(toISODate(now));
   const openMonths = [...touched.keys()].filter((m) => !finalized.has(m));
-  const recomputedMonths =
-    demo.length > 0
-      ? await recomputeMonths(db, { today })
-      : openMonths.length
-        ? await recomputeMonths(db, { today, months: openMonths })
-        : [];
+  const recomputedMonths = openMonths.length ? await recomputeMonths(db, { today, months: openMonths }) : [];
 
   // 6. Clock check: brokers shift with daylight saving.
   const detected = payload.detected_utc_offset_minutes;

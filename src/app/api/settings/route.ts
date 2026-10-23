@@ -15,6 +15,11 @@ const updateSchema = z
       .string()
       .refine((tz) => timezones.has(tz), "Unknown timezone")
       .optional(),
+    goldSymbols: z
+      .array(z.string().trim().regex(/^[A-Za-z0-9._#+!-]{2,32}$/, "Symbols are 2–32 letters, digits or . _ # + ! -"))
+      .min(1, "Keep at least one gold symbol")
+      .max(20)
+      .optional(),
     mt5: z
       .object({
         accountNumber: z.string().trim().regex(/^\d{4,12}$/, "Account number is 4–12 digits"),
