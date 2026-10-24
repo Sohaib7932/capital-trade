@@ -18,10 +18,6 @@ function SymbolCell({ symbol }: { symbol: string }) {
   );
 }
 
-const ticket = helper.accessor("ticket", {
-  header: "Ticket",
-  cell: (info) => <span className="num font-semibold">#{info.getValue()}</span>,
-});
 /** Client (or "Pool") with the MT5 login underneath. */
 export const accountColumn = helper.accessor("accountLogin", {
   header: "Client / account",
@@ -93,15 +89,16 @@ export const recentTradeColumns: DataTableColumn<Trade>[] = [
 ];
 
 export const tradeColumns: DataTableColumn<Trade>[] = [
-  ticket,
   accountColumn,
-  helper.accessor("openTime", {
-    header: "Open time",
-    cell: (info) => <DateTime value={info.getValue()} className="text-xs text-muted-foreground" />,
-  }),
+  // One column for both times keeps the table within the screen; sorts by close time.
   helper.accessor("closeTime", {
-    header: "Close time",
-    cell: (info) => <DateTime value={info.getValue()} className="text-xs" />,
+    header: "Closed / opened",
+    cell: (info) => (
+      <div className="leading-tight">
+        <DateTime value={info.getValue()} className="block text-xs" />
+        <DateTime value={info.row.original.openTime} className="mt-0.5 block text-[11px] text-muted-foreground" />
+      </div>
+    ),
   }),
   symbol,
   type,
