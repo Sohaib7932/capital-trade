@@ -8,6 +8,8 @@ import type {
   AdminProfile,
   CashClass,
   CashEvent,
+  DirectSummary,
+  NewClientAccount,
   DecimalString,
   ISODateTime,
   Mt5Account,
@@ -357,8 +359,31 @@ export function getMt5Positions(id: string): Promise<Mt5Position[]> {
   return request(`/mt5/accounts/${encodeURIComponent(id)}/positions`);
 }
 
-export function getCashEvents(query: { page?: number; pageSize?: number; unreviewed?: boolean } = {}): Promise<Paged<CashEvent>> {
-  return request(withQuery("/mt5/cash-events", { page: query.page, pageSize: query.pageSize, unreviewed: query.unreviewed ? "true" : undefined }));
+export function getCashEvents(
+  query: { page?: number; pageSize?: number; unreviewed?: boolean; clientId?: string } = {},
+): Promise<Paged<CashEvent>> {
+  return request(
+    withQuery("/mt5/cash-events", {
+      page: query.page,
+      pageSize: query.pageSize,
+      unreviewed: query.unreviewed ? "true" : undefined,
+      clientId: query.clientId,
+    }),
+  );
+}
+
+/** Add an MT5 account to a client (or link an existing pooled one). */
+export function addClientAccount(clientId: string, input: NewClientAccount): Promise<Mt5Account[]> {
+  return request(`/clients/${encodeURIComponent(clientId)}/accounts`, { method: "POST", json: input });
+}
+
+/** Replace an account's investor password. It is encrypted on the server and never returned. */
+export function replaceAccountPassword(accountId: string, investorPassword: string): Promise<Mt5Account> {
+  return request(`/mt5/accounts/${encodeURIComponent(accountId)}/password`, { method: "PUT", json: { investorPassword } });
+}
+
+export function getDirectSummary(month?: MonthKey): Promise<DirectSummary> {
+  return request(withQuery("/ibs/direct", { month }));
 }
 
 export function classifyCashEvent(input: {

@@ -1,9 +1,10 @@
 "use client";
 
-import { ArrowRight, Download, LineChart, ListChecks } from "lucide-react";
+import { Activity, ArrowRight, Download, LineChart, ListChecks, Trophy } from "lucide-react";
 import Link from "next/link";
 import { useState } from "react";
 import { useApp } from "@/components/layout/app-context";
+import { AccountStatus } from "@/components/shared/account-status";
 import { DataTable } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/shared/empty-state";
 import { KpiCard } from "@/components/shared/kpi-card";
@@ -49,7 +50,7 @@ export function DashboardView() {
       <div>
         <h1 className="text-xl font-bold tracking-tight sm:text-2xl">Dashboard</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          {month ? `Pool overview for ${formatMonth(month)}` : "Pool overview"} · XAUUSD
+          {month ? `Overview for ${formatMonth(month)}` : "Overview"} · all client accounts · XAUUSD
         </p>
       </div>
 
@@ -85,6 +86,13 @@ export function DashboardView() {
         </Card>
       </div>
 
+      {stats ? (
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+          <TopClients stats={stats} />
+          <SyncHealthCard stats={stats} />
+        </div>
+      ) : null}
+
       <RecentTrades stats={stats} />
     </div>
   );
@@ -99,7 +107,7 @@ function KpiRow({ stats }: { stats: DashboardStats }) {
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       <KpiCard
-        label="Total invested capital"
+        label="Client capital"
         value={formatCurrency(stats.totalInvestedCapital)}
         valueClassName="text-[22px]"
         badge={
@@ -107,7 +115,18 @@ function KpiRow({ stats }: { stats: DashboardStats }) {
             <Pill tone={flowSign > 0 ? "gold" : "red"}>{formatCurrency(stats.capitalFlow, { signed: true, compact: true })}</Pill>
           ) : null
         }
-        footer="Pooled client capital · never split"
+        footer="Deposits − withdrawals · never split"
+      />
+      <KpiCard
+        label="Total equity"
+        value={formatCurrency(stats.totalEquity)}
+        valueClassName="text-[22px]"
+        footer={
+          <>
+            Balance <span className="num font-semibold text-foreground">{formatCurrency(stats.totalBalance)}</span> · floating{" "}
+            <ProfitText value={stats.floatingPl} className="font-semibold" />
+          </>
+        }
       />
       <KpiCard
         label="This month net profit"
@@ -131,7 +150,7 @@ function KpiRow({ stats }: { stats: DashboardStats }) {
         badge={<Pill tone="grey">100 oz / lot</Pill>}
         footer={
           <>
-            <span className="num font-semibold text-foreground">{stats.tradeCount}</span> closed XAUUSD trades
+            <span className="num font-semibold text-foreground">{stats.tradeCount}</span> closed gold trades
           </>
         }
       />
@@ -142,16 +161,10 @@ function KpiRow({ stats }: { stats: DashboardStats }) {
         badge={stats.newClients > 0 ? <Pill tone="gold">+{stats.newClients} new</Pill> : null}
         footer={
           <>
-            Avg. investment <span className="num font-semibold text-foreground">{formatCurrency(avgInvestment, { places: 0 })}</span>
+            {stats.activeIbs} active IB{stats.activeIbs === 1 ? "" : "s"} · avg. capital{" "}
+            <span className="num font-semibold text-foreground">{formatCurrency(avgInvestment, { places: 0 })}</span>
           </>
         }
-      />
-      <KpiCard
-        label="Active IBs"
-        value={stats.activeIbs}
-        unit="brokers"
-        badge={<Pill tone="grey">{stats.activeIbs}/{stats.totalIbs} active</Pill>}
-        footer="Introducing brokers with clients"
       />
     </div>
   );
@@ -285,7 +298,7 @@ function RecentTrades({ stats }: { stats: DashboardStats | undefined }) {
           </span>
           <div>
             <h2 className="text-base font-bold">Recent Trades</h2>
-            <p className="text-xs text-muted-foreground">Latest closed XAUUSD positions synced from MT5</p>
+            <p className="text-xs text-muted-foreground">Latest closed gold positions across all MT5 accounts</p>
           </div>
         </div>
         <Link
@@ -299,7 +312,7 @@ function RecentTrades({ stats }: { stats: DashboardStats | undefined }) {
         <DataTable
           columns={recentTradeColumns}
           data={stats.recentTrades}
-          getRowId={(t) => String(t.ticket)}
+          getRowId={(t) => `${t.accountLogin}:${t.ticket}`}
           empty={<EmptyState icon={ListChecks} title="No trades yet" description="Closed trades will appear here once MT5 syncs." />}
         />
       ) : (
@@ -310,6 +323,103 @@ function RecentTrades({ stats }: { stats: DashboardStats | undefined }) {
           Subtotal ({stats.recentTrades.length} trades): <ProfitText value={subtotal} className="text-sm" />
         </div>
       ) : null}
+    </Card>
+  );
+}
+
+function TopClients({ stats }: { stats: DashboardStats }) {
+  return (
+    <Card className="gap-0 py-0">
+      <div className="flex items-center gap-3 border-b px-5 py-4">
+        <span className="flex size-9 items-center justify-center rounded-lg border bg-gold-soft text-gold-ink">
+          <Trophy className="size-4" aria-hidden />
+        </span>
+        <div>
+          <h2 className="text-base font-bold">Top clients</h2>
+          <p className="text-xs text-muted-foreground">By net trading profit this month</p>
+        </div>
+      </div>
+      {stats.topClients.length === 0 ? (
+        <EmptyState icon={Trophy} title="No client results yet" description="Clients appear here once their accounts trade." />
+      ) : (
+        <ul className="divide-y">
+          {stats.topClients.map((c, i) => (
+            <li key={c.id}>
+              <Link href={`/clients/${c.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40">
+                <span className="num w-5 text-xs text-muted-foreground">{i + 1}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-semibold">{c.fullName}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {c.ibName} · <span className="num">{formatLots(c.monthLots)}</span> lots
+                    {c.equity ? (
+                      <>
+                        {" "}
+                        · equity <span className="num">{formatCurrency(c.equity, { places: 0 })}</span>
+                      </>
+                    ) : null}
+                  </p>
+                </div>
+                <ProfitText value={c.monthNetProfit} className="text-sm font-semibold" />
+              </Link>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function SyncHealthCard({ stats }: { stats: DashboardStats }) {
+  const issues = stats.syncIssues;
+  return (
+    <Card className="gap-0 py-0">
+      <div className="flex items-center gap-3 border-b px-5 py-4">
+        <span
+          className={`flex size-9 items-center justify-center rounded-lg border ${issues.length ? "bg-loss-soft text-loss" : "bg-profit-soft text-profit-ink"}`}
+        >
+          <Activity className="size-4" aria-hidden />
+        </span>
+        <div>
+          <h2 className="text-base font-bold">Sync health</h2>
+          <p className="text-xs text-muted-foreground">
+            {issues.length ? `${issues.length} account${issues.length === 1 ? " needs" : "s need"} attention` : "Every active account is in sync"}
+          </p>
+        </div>
+        <Link href="/settings?tab=mt5" className="ml-auto text-sm font-semibold text-gold-ink hover:underline">
+          MT5 settings
+        </Link>
+      </div>
+      {issues.length === 0 ? (
+        <EmptyState icon={Activity} title="All green" description="Accounts synced within the last 5 minutes." />
+      ) : (
+        <ul className="divide-y">
+          {issues.map((a) => (
+            <li key={a.accountId} className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-5 py-3">
+              <div className="min-w-0 flex-1">
+                <p className="num text-sm font-semibold">
+                  {a.login} <span className="font-sans text-xs font-normal text-muted-foreground">{a.server}</span>
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {a.clientId ? (
+                    <Link href={`/clients/${a.clientId}`} className="hover:underline">
+                      {a.clientName}
+                    </Link>
+                  ) : (
+                    "Pooled account"
+                  )}
+                </p>
+              </div>
+              <AccountStatus
+                syncState={a.syncState}
+                health={a.health}
+                lastSyncAt={a.lastSyncAt}
+                lastErrorKind={a.lastErrorKind}
+                lastError={a.lastError}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </Card>
   );
 }

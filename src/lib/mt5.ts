@@ -1,4 +1,4 @@
-import type { ISODateTime, SyncHealth } from "./types";
+import type { ISODateTime, Mt5SyncState, SyncHealth } from "./types";
 
 export const SYNC_GREEN_MINUTES = 5;
 export const SYNC_AMBER_MINUTES = 30;
@@ -11,6 +11,33 @@ export function syncHealth(lastSyncAt: ISODateTime | null, lastStatus: "ok" | "e
   if (minutes < SYNC_GREEN_MINUTES) return "green";
   if (minutes < SYNC_AMBER_MINUTES) return "amber";
   return "red";
+}
+
+/** Where an account is in its sync life: paused, no password yet, waiting for its first sync, ok, or failing. */
+export function accountSyncState(a: {
+  isActive: boolean;
+  isDemo?: boolean;
+  passwordSet: boolean;
+  lastSyncAt: ISODateTime | null;
+  lastSyncStatus: "ok" | "error" | null;
+}): Mt5SyncState {
+  if (!a.isActive) return "paused";
+  if (a.lastSyncStatus === "error") return "error";
+  if (a.lastSyncAt) return "ok";
+  return a.passwordSet || a.isDemo ? "waiting" : "no_password";
+}
+
+const HEALTH_RANK: Record<SyncHealth, number> = { none: 0, green: 1, amber: 2, red: 3 };
+
+/** The worst of several sync healths ("none" if there are none). */
+export function worstHealth(values: SyncHealth[]): SyncHealth {
+  return values.reduce<SyncHealth>((worst, h) => (HEALTH_RANK[h] > HEALTH_RANK[worst] ? h : worst), "none");
+}
+
+/** What to tell an admin when an account's last sync failed. */
+export function syncErrorText(kind: "auth" | "other" | null, message: string | null): string {
+  if (kind === "auth") return "Wrong investor password or server";
+  return message ?? "The last sync failed";
 }
 
 /** MT5 deal types (ENUM_DEAL_TYPE). Only BUY/SELL are trading deals. */

@@ -69,7 +69,7 @@ function Line({ label, value, color, bold, last }: { label: string; value: strin
 }
 
 interface StatementProps {
-  client: ClientDetail;
+  client: Omit<ClientDetail, "accountDetails">;
   month: MonthKey;
   timeZone: string;
   generatedAt: Date;

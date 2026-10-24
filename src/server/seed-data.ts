@@ -9,13 +9,16 @@ import Decimal from "decimal.js";
 import { DEFAULT_SPLIT, sum, toMoney, tradeProfit } from "@/lib/calculations";
 import { daysInMonth, monthOf, monthStart, shiftMonth, toISODate, weekdayIndex } from "@/lib/dates";
 import type { IB, ISODate, MonthKey, SplitPercent, Trade, Transaction } from "@/lib/types";
+
+/** A seeded trade (seed trades belong to the demo account, not to a client). */
+export type SeedTrade = Omit<Trade, "accountLogin" | "accountLabel" | "clientId" | "clientName">;
 import { payoutKey, type ClientRecord, type MonthRecord, type PayoutRecord } from "./ledger";
 
 export interface SeedData {
   ibs: IB[];
   clients: ClientRecord[];
   transactions: Omit<Transaction, "locked">[];
-  trades: Trade[];
+  trades: SeedTrade[];
   months: Record<MonthKey, MonthRecord>;
   payouts: Record<string, PayoutRecord>;
   defaultSplit: SplitPercent;
@@ -90,9 +93,9 @@ const CLIENT_SEED: ClientSeed[] = [
 /** Monthly performance factor, oldest → current, for some variety. */
 const MONTH_FACTOR = [0.85, 1.1, 0.7, 1.2, 0.95, 1.0];
 
-function buildTrades(months: MonthKey[], now: Date, rand: ReturnType<typeof createRandom>): Trade[] {
+function buildTrades(months: MonthKey[], now: Date, rand: ReturnType<typeof createRandom>): SeedTrade[] {
   const today = toISODate(now);
-  const trades: Omit<Trade, "ticket">[] = [];
+  const trades: Omit<SeedTrade, "ticket">[] = [];
   let price = new Decimal("3880.00");
 
   months.forEach((month, monthIndex) => {
@@ -180,6 +183,7 @@ export function createSeedData(now: Date): SeedData {
         amount: toMoney(amount),
         date,
         note,
+        source: "manual",
       });
 
     add("deposit", seed.amount, joinedAt, "Initial investment");

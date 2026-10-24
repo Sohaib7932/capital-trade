@@ -5,3 +5,4 @@ state.tmp
 logs/
 .venv/
 __pycache__/
+worker.lock

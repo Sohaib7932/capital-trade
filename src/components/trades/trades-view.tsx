@@ -2,6 +2,7 @@
 
 import type { PaginationState, SortingState } from "@tanstack/react-table";
 import { CalendarDays, Download, ListChecks, Loader2, Table2 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useApp } from "@/components/layout/app-context";
@@ -18,7 +19,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAsync } from "@/hooks/use-async";
-import { exportTrades, getTradeDays, getTrades } from "@/lib/api";
+import { exportTrades, getClients, getMt5Accounts, getTradeDays, getTrades } from "@/lib/api";
 import { formatCurrency, formatLots, sumMoney } from "@/lib/calculations";
 import { formatDate, monthEnd, monthStart } from "@/lib/dates";
 import type { ISODate, MonthKey, TradeFilters, TradeSortKey, TradeSummary, TradeType } from "@/lib/types";
@@ -38,6 +39,11 @@ export function TradesView() {
   const { month, dataVersion, timeZone } = useApp();
   const [custom, setCustom] = useState<Range | null>(null);
   const [type, setType] = useState(ALL);
+  const params = useSearchParams();
+  const [clientId, setClientId] = useState(params.get("clientId") ?? ALL);
+  const [account, setAccount] = useState(params.get("account") ?? ALL);
+  const { data: clients } = useAsync(() => getClients({ pageSize: 500, sort: "fullName", dir: "asc" }), [dataVersion]);
+  const { data: accounts } = useAsync(getMt5Accounts, [dataVersion]);
   const [view, setView] = useState<"table" | "calendar">("table");
   const [pagination, setPagination] = useState<PaginationState>(FIRST_PAGE);
   const [sorting, setSorting] = useState<SortingState>([{ id: "closeTime", desc: true }]);
@@ -50,7 +56,10 @@ export function TradesView() {
     from: range?.from,
     to: range?.to,
     type: type === ALL ? undefined : (type as TradeType),
+    clientId: clientId === ALL ? undefined : clientId,
+    accountLogin: account === ALL ? undefined : Number(account),
   };
+  const accountOptions = (accounts ?? []).filter((a) => !a.isDemo && (clientId === ALL || a.linkedClientId === clientId));
   const sortId = sorting[0]?.id as TradeSortKey | undefined;
   const sortDesc = sorting[0]?.desc ?? true;
 
@@ -63,12 +72,27 @@ export function TradesView() {
         sort: sortId,
         dir: sortDesc ? "desc" : "asc",
       }),
-    [filters.from, filters.to, filters.type, pagination.pageIndex, pagination.pageSize, sortId, sortDesc, dataVersion],
+    [
+      filters.from,
+      filters.to,
+      filters.type,
+      filters.clientId,
+      filters.accountLogin,
+      pagination.pageIndex,
+      pagination.pageSize,
+      sortId,
+      sortDesc,
+      dataVersion,
+    ],
     { enabled: validRange, keepPreviousData: true },
   );
-  const { data: days } = useAsync(() => getTradeDays(filters), [filters.from, filters.to, filters.type, dataVersion], {
-    enabled: validRange && view === "calendar",
-  });
+  const { data: days } = useAsync(
+    () => getTradeDays(filters),
+    [filters.from, filters.to, filters.type, filters.clientId, filters.accountLogin, dataVersion],
+    {
+      enabled: validRange && view === "calendar",
+    },
+  );
 
   function updateRange(patch: Partial<Pick<Range, "from" | "to">>) {
     if (range) setCustom({ ...range, ...patch });
@@ -91,7 +115,7 @@ export function TradesView() {
     <div className="space-y-6">
       <PageHeader
         title="Trades"
-        description={`Closed XAUUSD positions from MT5. Net = profit + swap + commission. Dates and times in ${timeZone}.`}
+        description={`Closed gold positions from every MT5 account. Net = profit + swap + commission. Dates and times in ${timeZone}.`}
         actions={
           <Button variant="outline" disabled={!page?.total || exporting} onClick={onExport}>
             {exporting ? <Loader2 className="animate-spin" aria-hidden /> : <Download aria-hidden />} Export Excel
@@ -149,6 +173,46 @@ export function TradesView() {
                 ]}
               />
             </div>
+            <div className="grid gap-1">
+              <span className="eyebrow" aria-hidden>
+                Client
+              </span>
+              <FilterSelect
+                label="Filter by client"
+                value={clientId}
+                onChange={(v) => {
+                  setClientId(v);
+                  setAccount(ALL);
+                  setPagination(FIRST_PAGE);
+                }}
+                className="md:w-44"
+                options={[
+                  { value: ALL, label: "All clients" },
+                  ...(clients?.rows ?? []).map((c) => ({ value: c.id, label: c.fullName })),
+                ]}
+              />
+            </div>
+            <div className="grid gap-1">
+              <span className="eyebrow" aria-hidden>
+                Account
+              </span>
+              <FilterSelect
+                label="Filter by MT5 account"
+                value={account}
+                onChange={(v) => {
+                  setAccount(v);
+                  setPagination(FIRST_PAGE);
+                }}
+                className="md:w-40"
+                options={[
+                  { value: ALL, label: "All accounts" },
+                  ...accountOptions.map((a) => ({
+                    value: String(a.login),
+                    label: `${a.login}${a.linkedClientName ? "" : " (pool)"}`,
+                  })),
+                ]}
+              />
+            </div>
           </div>
           <Tabs value={view} onValueChange={(v) => setView(v as "table" | "calendar")} className="md:ml-auto">
             <TabsList aria-label="View">
@@ -176,7 +240,7 @@ export function TradesView() {
           <DataTable
             columns={tradeColumns}
             data={page.rows}
-            getRowId={(t) => String(t.ticket)}
+            getRowId={(t) => `${t.accountLogin}:${t.ticket}`}
             server={{
               rowCount: page.total,
               pagination,
@@ -215,7 +279,11 @@ function TradeSummaryCards({ summary }: { summary: TradeSummary }) {
         }
       />
       <KpiCard label="Total lots" value={formatLots(summary.lots)} unit="lots" footer="100 oz per lot" />
-      <KpiCard label="Gross profit" value={<ProfitText value={summary.profit} className="font-bold" />} footer="From price movement" />
+      <KpiCard
+        label="Gross profit"
+        value={<ProfitText value={summary.profit} className="font-bold" />}
+        footer="From price movement"
+      />
       <KpiCard
         label="Swap + commission"
         value={<ProfitText value={costs} className="font-bold" />}

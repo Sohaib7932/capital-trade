@@ -8,7 +8,9 @@ const schema = z.object({
   ibId: z.string().max(40).optional(),
   status: z.enum(["active", "inactive"]).optional(),
   search: z.string().max(100).optional(),
-  sort: z.enum(["fullName", "ibName", "investedCapital", "joinedAt", "monthProfit", "totalProfit"]).optional(),
+  sort: z
+    .enum(["fullName", "ibName", "investedCapital", "joinedAt", "monthProfit", "monthNetProfit", "totalProfit", "carriedLoss"])
+    .optional(),
   dir: z.enum(["asc", "desc"]).optional(),
 });
 

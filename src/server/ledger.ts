@@ -1,8 +1,10 @@
 import Decimal from "decimal.js";
 import { percentOf, sum, sumMoney, toDecimal, toMoney } from "@/lib/calculations";
 import { monthEnd, monthOf, shiftMonth, toISODate } from "@/lib/dates";
+import { accountSyncState, syncHealth, worstHealth } from "@/lib/mt5";
 import type {
   Client,
+  ClientAccountBrief,
   ClientDetail,
   ClientMonthRecord,
   ClientPage,
@@ -12,6 +14,8 @@ import type {
   ClientSummary,
   DashboardStats,
   DecimalString,
+  DirectSummary,
+  ISODateTime,
   IB,
   IBClientRow,
   IBCommissionRule,
@@ -27,6 +31,8 @@ import type {
   Payout,
   PayoutStatus,
   SplitPercent,
+  SyncIssue,
+  TopClient,
   Trade,
   Transaction,
 } from "@/lib/types";
@@ -68,6 +74,26 @@ export interface PayoutRecord {
   amount?: DecimalString;
   status: PayoutStatus;
   paidAt?: ISODate;
+  /** Fee payouts: fee payments received so far. */
+  paidAmount?: DecimalString;
+}
+
+/** An MT5 account as the ledger needs it (real accounts only). */
+export interface SnapshotAccount {
+  id: string;
+  login: number;
+  server: string;
+  label: string;
+  clientId: string | null;
+  isActive: boolean;
+  passwordSet: boolean;
+  lastSyncAt: ISODateTime | null;
+  lastSyncStatus: "ok" | "error" | null;
+  lastError: string | null;
+  lastErrorKind: "auth" | "other" | null;
+  balance: DecimalString | null;
+  equity: DecimalString | null;
+  floatingPl: DecimalString | null;
 }
 
 /** A month's pool totals, from `daily_pnl`. */
@@ -119,6 +145,10 @@ export interface Snapshot {
   pools: Record<MonthKey, MonthPool>;
   allocations: Record<MonthKey, MonthClientAllocation[]>;
   settlements: Record<MonthKey, SettlementRecord[]>;
+  /** Real MT5 accounts (pooled and client-linked). */
+  accounts: SnapshotAccount[];
+  /** Lots opened per month in each client's own accounts: month → client → lots. */
+  clientLots: Record<MonthKey, Record<string, DecimalString>>;
   defaultSplit: SplitPercent;
   lossHandling: LossHandling;
   /** Off: no IB commission is calculated (rules are kept for later). */
@@ -136,6 +166,12 @@ const NO_COMMISSION: IBCommissionRule = { percent: 0, source: "from_company_shar
 export function payoutKey(month: MonthKey, partyType: PartyType, partyId: string): string {
   return `${month}:${partyType}:${partyId}`;
 }
+
+const ZERO_MONEY = "0.00";
+const sumOrNull = (values: (DecimalString | null)[]) => {
+  const present = values.filter((v): v is DecimalString => v !== null);
+  return present.length ? sumMoney(present) : null;
+};
 
 const EMPTY_POOL: MonthPool = { net: "0.00", lots: "0.00", trades: 0, tradingDays: 0, capitalDays: "0" };
 const nonNegative = (value: Decimal.Value) => toMoney(Decimal.max(toDecimal(value), 0));
@@ -215,14 +251,21 @@ export class Ledger {
     const rows: ClientSplitRow[] = settled
       .map((r) => {
         const client = this.clientRecord(r.clientId);
-        const payout = this.s.payouts[payoutKey(month, "client", r.clientId)];
+        // Clients with their own accounts keep the profit there and owe the shares ("fee").
+        const feeKey = payoutKey(month, "fee", r.clientId);
+        const payoutType: "client" | "fee" = this.s.payouts[feeKey] || (!finalized && this.hasOwnAccounts(r.clientId)) ? "fee" : "client";
+        const payout = this.s.payouts[payoutKey(month, payoutType, r.clientId)];
+        const due = payoutType === "fee" ? sum([r.trader, r.company, r.ib]) : r.client;
         return {
           ...r,
           clientCode: client.code,
           clientName: client.fullName,
           ibName: this.ibName(r.ibId),
+          splitBase: nonNegative(toDecimal(r.grossProfit).plus(r.carryIn)),
+          payoutType,
           payoutStatus: payout?.status ?? "pending",
-          payoutAmount: finalized && payout?.amount ? payout.amount : nonNegative(r.client),
+          payoutAmount: finalized && payout?.amount ? payout.amount : nonNegative(due),
+          paidAmount: payout?.paidAmount ?? ZERO_MONEY,
           paidAt: payout?.paidAt,
         };
       })
@@ -330,6 +373,35 @@ export class Ledger {
     return ibId ? this.s.ibs.find((ib) => ib.id === ibId) : undefined;
   }
 
+  private hasOwnAccounts(clientId: string): boolean {
+    return this.s.accounts.some((a) => a.clientId === clientId);
+  }
+
+  private accountsOf(clientId: string): SnapshotAccount[] {
+    return this.s.accounts.filter((a) => a.clientId === clientId);
+  }
+
+  private accountHealth(a: SnapshotAccount) {
+    return a.isActive ? syncHealth(a.lastSyncAt, a.lastSyncStatus, this.s.now) : "none";
+  }
+
+  private brief(a: SnapshotAccount): ClientAccountBrief {
+    return {
+      id: a.id,
+      login: a.login,
+      server: a.server,
+      syncState: accountSyncState(a),
+      health: this.accountHealth(a),
+      balance: a.balance,
+      equity: a.equity,
+      floatingPl: a.floatingPl,
+    };
+  }
+
+  private clientMonthLots(clientId: string, month: MonthKey): DecimalString {
+    return this.s.clientLots[month]?.[clientId] ?? "0.00";
+  }
+
   private ibName(ibId: string | null): string {
     return ibId ? (this.ibOf(ibId)?.name ?? "—") : DIRECT_LABEL;
   }
@@ -376,6 +448,8 @@ export class Ledger {
           {
             month,
             monthStatus: split.status,
+            splitBase: row.splitBase,
+            payoutType: row.payoutType,
             capital: row.capital,
             grossProfit: row.grossProfit,
             carryIn: row.carryIn,
@@ -396,23 +470,51 @@ export class Ledger {
 
   private toClientSummary(record: ClientRecord, month: MonthKey): ClientSummary {
     const history = this.clientHistory(record.id);
+    const current = history.find((h) => h.month === month);
+    const accounts = this.accountsOf(record.id);
     return {
       ...this.toClient(record),
-      monthProfit: history.find((h) => h.month === month)?.client ?? toMoney(0),
+      monthProfit: current?.client ?? toMoney(0),
       totalProfit: sumMoney(history.map((h) => h.client)),
       carriedLoss: this.carry.get(record.id) ?? toMoney(0),
+      accounts: accounts.map((a) => this.brief(a)),
+      balance: sumOrNull(accounts.map((a) => a.balance)),
+      equity: sumOrNull(accounts.map((a) => a.equity)),
+      floatingPl: sumOrNull(accounts.map((a) => a.floatingPl)),
+      monthNetProfit: current?.grossProfit ?? ZERO_MONEY,
+      monthLots: this.clientMonthLots(record.id, month),
+      syncHealth: worstHealth(accounts.map((a) => this.accountHealth(a))),
     };
   }
 
-  private toIBSummary(ib: IB, month: MonthKey): IBSummary {
-    const clients = this.s.clients.filter((c) => c.ibId === ib.id);
+  /** Totals for a group of clients (an IB's, or the Direct ones) in `month`. */
+  private groupTotals(clients: ClientRecord[], month: MonthKey) {
     const summaries = clients.map((c) => this.toClientSummary(c, month));
+    return {
+      clientCount: clients.filter((c) => c.status === "active").length,
+      totalCapital: sumMoney(summaries.map((c) => c.investedCapital)),
+      monthLots: toDecimal(sum(summaries.map((c) => c.monthLots))).toFixed(2),
+      monthNetProfit: sumMoney(summaries.map((c) => c.monthNetProfit)),
+      monthClientProfit: sumMoney(summaries.map((c) => c.monthProfit)),
+    };
+  }
+
+  /** Clients without an IB, summarised like an IB. */
+  directSummary(month?: MonthKey): DirectSummary {
+    return this.groupTotals(
+      this.s.clients.filter((c) => c.ibId === null),
+      month ?? this.currentMonth,
+    );
+  }
+
+  private toIBSummary(ib: IB, month: MonthKey): IBSummary {
     const split = this.monthlySplit(month);
     return {
       ...ib,
-      clientCount: clients.filter((c) => c.status === "active").length,
-      totalCapital: sumMoney(summaries.map((c) => c.investedCapital)),
-      monthClientProfit: sumMoney(summaries.map((c) => c.monthProfit)),
+      ...this.groupTotals(
+        this.s.clients.filter((c) => c.ibId === ib.id),
+        month,
+      ),
       monthCommission: sumMoney(split.rows.filter((r) => r.ibId === ib.id).map((r) => r.ib)),
     };
   }
@@ -444,7 +546,50 @@ export class Ledger {
       totalIbs: this.s.ibs.length,
       distribution: { trader: split.trader, company: split.company, client: split.client, ib: split.ib },
       recentTrades,
+      totalBalance: sumMoney(this.s.accounts.map((a) => a.balance ?? 0)),
+      totalEquity: sumMoney(this.s.accounts.map((a) => a.equity ?? 0)),
+      floatingPl: sumMoney(this.s.accounts.map((a) => a.floatingPl ?? 0)),
+      topClients: this.topClients(month),
+      syncIssues: this.syncIssues(),
     };
+  }
+
+  private topClients(month: MonthKey, limit = 5): TopClient[] {
+    return this.s.clients
+      .map((c) => this.toClientSummary(c, month))
+      .filter((c) => c.accounts.length > 0 || !toDecimal(c.monthNetProfit).isZero())
+      .sort((a, b) => toDecimal(b.monthNetProfit).comparedTo(toDecimal(a.monthNetProfit)))
+      .slice(0, limit)
+      .map((c) => ({
+        id: c.id,
+        fullName: c.fullName,
+        ibName: c.ibName,
+        monthNetProfit: c.monthNetProfit,
+        monthLots: c.monthLots,
+        equity: c.equity,
+      }));
+  }
+
+  /** Active accounts that need attention: failing, stale (amber/red) or not synced yet. */
+  private syncIssues(): SyncIssue[] {
+    const rank = { error: 0, no_password: 1, waiting: 2, ok: 3, paused: 4 } as const;
+    return this.s.accounts
+      .filter((a) => a.isActive)
+      .map((a) => ({ a, health: this.accountHealth(a), state: accountSyncState(a) }))
+      .filter(({ health, state }) => state !== "ok" || health === "amber" || health === "red")
+      .sort((x, y) => rank[x.state] - rank[y.state] || x.a.login - y.a.login)
+      .map(({ a, health, state }) => ({
+        accountId: a.id,
+        login: a.login,
+        server: a.server,
+        clientId: a.clientId,
+        clientName: a.clientId ? (this.s.clients.find((c) => c.id === a.clientId)?.fullName ?? null) : null,
+        health,
+        syncState: state,
+        lastSyncAt: a.lastSyncAt,
+        lastError: a.lastError,
+        lastErrorKind: a.lastErrorKind,
+      }));
   }
 
   clients(query: ClientQuery): ClientPage {
@@ -458,7 +603,7 @@ export class Ledger {
 
     const key = query.sort ?? "fullName";
     const dir = query.dir === "desc" ? -1 : 1;
-    const money = key === "investedCapital" || key === "monthProfit" || key === "totalProfit";
+    const money = ["investedCapital", "monthProfit", "monthNetProfit", "totalProfit", "carriedLoss"].includes(key);
     all.sort((a, b) => {
       const cmp = money
         ? toDecimal(a[key]).comparedTo(toDecimal(b[key]))
@@ -475,7 +620,7 @@ export class Ledger {
     };
   }
 
-  client(id: string, month?: MonthKey): ClientDetail | null {
+  client(id: string, month?: MonthKey): Omit<ClientDetail, "accountDetails"> | null {
     const record = this.s.clients.find((c) => c.id === id);
     if (!record) return null;
     return {

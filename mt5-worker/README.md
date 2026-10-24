@@ -1,150 +1,113 @@
 # CapitalTrade MT5 sync worker
 
-A small Python program that runs on a **Windows VPS** next to the MetaTrader 5 terminal. Every minute it logs in to each
-MT5 account with the **investor (read-only) password**, reads the balance, open positions and deal history, and sends
-them to CapitalTrade (`POST /api/ingest/mt5`). Passwords stay on the VPS; the app never sees them.
+A small Python program that runs on a Windows machine (or VPS) next to its **own copy** of MetaTrader 5. Every few
+minutes it:
 
-It is safe to run continuously: the app ignores deals it already has, so the worker always re-sends the last 2 days.
+1. asks CapitalTrade for the list of client MT5 accounts (`GET /api/ingest/mt5/accounts`),
+2. decrypts each account's **investor (read-only) password** locally,
+3. logs in to each account in turn, reads the balance, open positions and deal history,
+4. sends them to CapitalTrade (`POST /api/ingest/mt5`).
+
+The software never trades. Passwords are entered in the app, stored there only encrypted, and decrypted only here.
+New clients are picked up on the next cycle without a restart. One failing account (e.g. a wrong password) never
+stops the others; its error shows in the app.
 
 ## What you need
 
-- A Windows VPS (Windows Server 2019/2022 or Windows 10/11), ideally in the same region as your broker's server.
-  2 vCPU / 4 GB RAM is plenty.
-- Your broker's **MetaTrader 5** installer, the account **login number**, **server name**, and **investor password**
-  (MT5 → right-click the account → *Change password* → *Investor*, or ask the broker).
-- From the CapitalTrade app: its URL and the `MT5_INGEST_KEY` value set in its environment.
+- Windows 10/11 or Windows Server 2019/2022 (a VPS near the broker is ideal). 2 vCPU / 4 GB RAM is plenty.
+- **Python 3.11+ (64-bit)** — the `MetaTrader5` package only works with 64-bit Python on Windows.
+- The EC Markets **MetaTrader 5** installer.
+- From the CapitalTrade app: its URL and `MT5_INGEST_KEY`.
 
-## Setup (step by step)
+## 1. A separate MT5 copy for the worker (important)
 
-### 1. Install MetaTrader 5 from your broker
+Logging in to an account switches the terminal to that account. If the worker used the trader's terminal, the trader
+would be kicked to another account in the middle of trading. So the worker gets its **own portable copy**, and refuses to
+start on a normal installation (anything under `C:\Program Files`) unless `ALLOW_SHARED_TERMINAL=true`.
 
-1. On the VPS, download MT5 **from your broker's website** (not the generic MetaQuotes one, so the server list is right).
-2. Install it. Note the install folder, e.g. `C:\Program Files\YourBroker MetaTrader 5\` — you need the full path to
-   `terminal64.exe`.
+1. Install MT5 normally once (or use the trader's existing installation as the source — it is only read).
+2. Copy the program folder to a folder of its own, e.g. in PowerShell:
+   ```powershell
+   robocopy "C:\Program Files\MetaTrader 5" C:\MT5-Sync /E /XD "C:\Program Files\MetaTrader 5\Bases"
+   ```
+3. Give the copy the broker's server list: copy `servers.dat` from the normal terminal's data folder
+   (MT5 → **File → Open Data Folder** → `config\servers.dat`) to `C:\MT5-Sync\Config\servers.dat`.
+4. Optional check: start `C:\MT5-Sync\terminal64.exe /portable` once, **File → Login to Trade Account**, log in with
+   any client's investor password on `ECMarketsLtd-Live`, then close it.
+5. Set `MT5_PATH=C:\MT5-Sync\terminal64.exe` in `.env`. The worker starts it in portable mode itself.
 
-### 2. Log in once by hand with the investor password
+For many accounts you can make more copies (`C:\MT5-Sync-2`, …) and list them in `MT5_PATHS`; accounts are split
+across them and synced in parallel.
 
-1. Open MT5 → **File → Login to Trade Account**.
-2. Enter the login, the **investor** password, and pick the exact server. Tick **Save password**.
-3. Check that the account's history appears (**Toolbox → History**, right-click → *All History*).
-4. Close MT5. (The worker starts the terminal itself.)
-
-> Logging in once by hand makes the terminal download the server list and accept the broker's terms. The Python
-> library can't do that step.
-
-### 3. Install Python 3.11+ (64-bit)
-
-1. Download **Windows installer (64-bit)** from <https://www.python.org/downloads/windows/>.
-2. Tick **Add python.exe to PATH**, then *Install Now*.
-3. Open **PowerShell** and check: `python --version` → `Python 3.11` or newer.
-
-The `MetaTrader5` package only works with **64-bit** Python on **Windows**.
-
-### 4. Install the worker
+## 2. Install the worker
 
 ```powershell
-# Copy the mt5-worker folder to the VPS, e.g. C:\capitaltrade\mt5-worker
 cd C:\capitaltrade\mt5-worker
 python -m venv .venv
 .\.venv\Scripts\python -m pip install --upgrade pip
 .\.venv\Scripts\pip install -r requirements.txt
-```
-
-### 5. Register the account in CapitalTrade
-
-In the app: **Settings → MT5 Connection → Add account**. Enter the same login and server, choose the broker clock
-(most brokers: **UTC+2 in winter, UTC+3 in summer**), and whether profit goes to the pool or one client.
-The app refuses data from accounts that aren't registered.
-
-### 6. Configure `.env` (and `accounts.json` for several accounts)
-
-```powershell
 copy .env.example .env
 notepad .env
 ```
 
 | Setting | Value |
 | --- | --- |
-| `MT5_PATH` | Full path to `terminal64.exe` from step 1 |
-| `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER` | The account and its **investor** password (single-account setup) |
-| `API_URL` | Your app, e.g. `https://capitaltrade.vercel.app` (no trailing slash) |
+| `MT5_PATH` | The worker's portable terminal, e.g. `C:\MT5-Sync\terminal64.exe` |
+| `API_URL` | The app, e.g. `https://capital-trade-seven.vercel.app` (no trailing slash) |
 | `MT5_INGEST_KEY` | Exactly the value in the app's environment |
-| `SYNC_INTERVAL_SECONDS` | `60` |
-| `LOOKBACK_DAYS_FIRST_RUN` | `90` — how much history the very first sync pulls |
+| `MT5_CREDENTIALS_PRIVATE_KEY` | Written by `npm run mt5:keygen` (app folder). Keep it only here |
+| `LOOKBACK_DAYS_FIRST_RUN` | `90` — history pulled the first time an account syncs |
 
-**Several accounts:** copy `accounts.example.json` to `accounts.json` and list them. When `accounts.json` exists it
-replaces the `MT5_LOGIN/…` settings. Each entry can use `"password"` or `"password_env": "NAME"` (read from `.env`),
-and an optional `"path"` if an account needs its own terminal installation.
+The sync interval (default 5 minutes) is set in the app: **Settings → MT5 Connection → Sync interval**.
 
-Lock the folder down — `.env` and `accounts.json` hold passwords:
+Lock the folder down — `.env` holds the private key:
 
 ```powershell
 icacls C:\capitaltrade\mt5-worker /inheritance:r /grant:r "$env:USERNAME:(OI)(CI)F" /grant:r "SYSTEM:(OI)(CI)F"
 ```
 
-### 7. Test
+## 3. Add clients in the app
+
+**Clients → Add Client**: name, contact, Source (Direct or an IB), and the MT5 login, server (`ECMarketsLtd-Live` or
+`ECMarketsLtd-Demo`) and **investor** password. The account shows *Waiting for first sync* until the next cycle.
+
+## 4. Test
 
 ```powershell
-.\.venv\Scripts\python worker.py --test-connection   # logs in, prints balance and the broker clock offset
-.\.venv\Scripts\python worker.py --once              # one full sync; check the app's Settings → MT5 Connection
+.\start-worker.bat --test-connection   # logs in to every account and prints balances (no data sent)
+.\start-worker.bat --once              # one full sync
 ```
 
-`--test-connection` prints the broker clock it measured (e.g. `UTC+3.0h`). Make sure the app's account setting matches.
-If the market is closed it prints *unknown* — that's fine.
+## 5. Run it in the background (starts after reboot)
 
-### 8. Run it as a Windows service (starts after reboot)
+Use **Task Scheduler** (MT5 needs a user session, so not a service):
 
-1. Download **NSSM** from <https://nssm.cc/download>, unzip, and copy `win64\nssm.exe` to `C:\Windows\System32\`.
-2. In an **Administrator** PowerShell:
+1. *Create Task* → General: *Run only when user is logged on* (or *whether user is logged on or not* on a VPS with
+   auto-logon), tick *Run with highest privileges*.
+2. Triggers: *At log on* (and/or *At startup*).
+3. Actions: *Start a program* → `C:\capitaltrade\mt5-worker\start-worker.bat`, *Start in* `C:\capitaltrade\mt5-worker`.
+4. Settings: untick *Stop the task if it runs longer than…*; *If the task is already running: Do not start a new instance*.
 
-```powershell
-$dir = "C:\capitaltrade\mt5-worker"
-nssm install CapitalTradeMT5 "$dir\.venv\Scripts\python.exe" "$dir\worker.py"
-nssm set CapitalTradeMT5 AppDirectory $dir
-nssm set CapitalTradeMT5 DisplayName "CapitalTrade MT5 sync"
-nssm set CapitalTradeMT5 Start SERVICE_AUTO_START
-nssm set CapitalTradeMT5 AppStdout "$dir\logs\service.log"
-nssm set CapitalTradeMT5 AppStderr "$dir\logs\service.log"
-nssm set CapitalTradeMT5 AppRestartDelay 10000
-# Run as the Windows user that installed MT5 and logged in once (step 2) — not LocalSystem,
-# which can't see that user's MT5 data folder.
-nssm set CapitalTradeMT5 ObjectName ".\YourWindowsUser" "YourWindowsPassword"
-nssm start CapitalTradeMT5
-```
-
-Check it: `nssm status CapitalTradeMT5` → `SERVICE_RUNNING`, and `logs\worker.log` gets a line every minute.
-
-> If MT5 refuses to start from the service on your VPS (some terminal builds need an interactive desktop), use
-> **Task Scheduler** instead: *Create Task* → run whether user is logged on or not → trigger *At startup* → action
-> `C:\capitaltrade\mt5-worker\.venv\Scripts\python.exe` with argument `worker.py` and *Start in*
-> `C:\capitaltrade\mt5-worker` → in *Settings*, untick "Stop the task if it runs longer than…".
+Only one worker can run per folder: a second copy exits with *Another worker is already running*.
 
 ## Day to day
 
 - **Logs:** `logs\worker.log` (rotates at 5 MB, keeps 5 files).
-- **Status:** the app's top bar shows *MT5 Synced • Xm ago*; Settings → MT5 Connection shows each account (green < 5 min,
-  amber < 30 min, red otherwise) and the last error.
-- **Daylight saving:** when the broker's clock changes, the app shows a warning with the detected offset. Update the
-  account's broker clock in Settings — open months are corrected automatically.
-- **Password changed?** Update `.env` / `accounts.json`, then `nssm restart CapitalTradeMT5`.
-- **Resync from scratch:** stop the service, delete `state.json`, start it — the first run pulls `LOOKBACK_DAYS_FIRST_RUN`
-  again (the app ignores what it already has).
-- **Upgrade:** stop the service, replace `worker.py`, `pip install -r requirements.txt`, start it.
-
-## What gets sent
-
-Per account, per cycle: `account_info()` (balance, equity, margin, floating P/L), `positions_get()`, and
-`history_deals_get(last successful sync − 2 days, now + 1 day)`. MT5 reports times in the broker's clock; the app
-converts them to UTC using the account's offset. Balance operations (deposits, credit, bonus, …) are stored for review
-and never counted as trading profit.
+- **Status:** the app's top bar, **Dashboard → Sync health**, and each client's page (green < 5 min after a sync,
+  amber < 30 min, red otherwise). A rejected login shows *Wrong investor password or server* — use **Replace password**
+  on the client's page.
+- **Daylight saving:** when the broker's clock changes, the app warns with the detected offset; update the account's
+  broker clock in Settings → MT5 Connection.
+- **New key pair?** (`npm run mt5:keygen -- --force`) — every investor password must be re-entered in the app.
+- **Resync from scratch:** stop the worker, delete `state.json`, start it (the app ignores deals it already has).
 
 ## Troubleshooting
 
 | Symptom | Fix |
 | --- | --- |
-| `MT5 login failed … Authorization failed` | Wrong investor password or server name. Log in by hand (step 2) to confirm. |
-| `IPC timeout` / `terminal not found` | Wrong `MT5_PATH`, or the terminal was never started once by this Windows user. |
+| `MT5_PATH … is a normal MT5 installation` | Point `MT5_PATH` at the portable copy (section 1). |
+| `Wrong investor password or server` | Replace the password on the client's page; check the server name. |
+| `Couldn't start the MT5 terminal` | Wrong `MT5_PATH`, or the copy is missing files. |
+| `can't read the stored password … different key` | The key pair changed; re-enter that account's password. |
 | `HTTP 401: Invalid ingest key` | `MT5_INGEST_KEY` differs from the app's. |
-| `HTTP 404 … isn't registered` | Add the account in Settings → MT5 Connection (same login and server). |
-| `Server mismatch` | The server name in the app differs from MT5's. Copy it exactly. |
-| Times look shifted by an hour | The account's broker clock in Settings is off (daylight saving). |
+| `Another worker is already running` | Close the other window / Task Scheduler instance. |

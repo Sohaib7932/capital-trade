@@ -3,6 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Loader2 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
+import { useState } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -69,10 +70,12 @@ export function SettingsView() {
         <TabsContent value="split" className="space-y-6">
           <SplitSettings settings={settings} />
           <LossHandlingSettings />
+          <IbCommissionSettings settings={settings} />
           <TimezoneSettings settings={settings} />
         </TabsContent>
         <TabsContent value="mt5" className="space-y-6">
           <Mt5Panel />
+          <SyncIntervalSettings settings={settings} />
           <GoldSymbolsSettings settings={settings} />
         </TabsContent>
         <TabsContent value="profile" className="space-y-6">
@@ -186,6 +189,98 @@ function LossHandlingSettings() {
           If a client&apos;s result since their last split is negative, nothing is split. When profit comes back, the loss is
           recovered first and only the profit above it is split (e.g. October −300, November +1,000 → November splits 700).
         </p>
+      </div>
+    </SettingsCard>
+  );
+}
+
+// --- IB commissions ------------------------------------------------------------
+
+function IbCommissionSettings({ settings }: { settings: Settings }) {
+  const { canEdit } = useApp();
+  const save = useSaveSettings();
+  const [pending, setPending] = useState(false);
+  const on = settings.ibCommissionsEnabled;
+
+  async function toggle() {
+    setPending(true);
+    await save(
+      { ibCommissionsEnabled: !on },
+      on ? "IB commissions turned off" : "IB commissions turned on",
+      "Open months were recalculated. Finalized months keep their numbers.",
+    );
+    setPending(false);
+  }
+
+  return (
+    <SettingsCard
+      title="IB commissions"
+      description="Each IB has a rule (percent of their clients' profit, from the company's share or additional). While off, no commission is calculated and commission columns are hidden."
+    >
+      <div className="flex items-center justify-between gap-4 px-6 py-5">
+        <div>
+          <p className="text-sm font-semibold">IB commissions are {on ? "on" : "off"}</p>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            {on ? "Each IB's rule applies to open months." : "IB pages still show each IB's clients, capital, lots and profit."}
+          </p>
+        </div>
+        {canEdit ? (
+          <Button variant={on ? "outline" : "default"} onClick={toggle} disabled={pending}>
+            {pending ? <Loader2 className="animate-spin" aria-hidden /> : null}
+            {on ? "Turn off" : "Turn on"}
+          </Button>
+        ) : null}
+      </div>
+    </SettingsCard>
+  );
+}
+
+// --- Sync interval -----------------------------------------------------------------
+
+const INTERVALS = [60, 120, 300, 600, 900, 1800];
+
+function SyncIntervalSettings({ settings }: { settings: Settings }) {
+  const { canEdit } = useApp();
+  const save = useSaveSettings();
+  const [value, setValue] = useState(String(settings.syncIntervalSeconds));
+  const [pending, setPending] = useState(false);
+  const dirty = value !== String(settings.syncIntervalSeconds);
+
+  return (
+    <SettingsCard
+      title="Sync interval"
+      description="How often the MT5 worker reads every account. It picks up a new value (and new accounts) on its next cycle."
+    >
+      <div className="flex flex-col gap-3 px-6 py-5 sm:flex-row sm:items-end">
+        <FormField id="sync-interval" label="Every" className="sm:w-56">
+          <select
+            id="sync-interval"
+            disabled={!canEdit}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            className="h-9 w-full rounded-lg border border-input bg-card px-3 text-sm focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-60"
+          >
+            {INTERVALS.map((s) => (
+              <option key={s} value={s}>
+                {s < 120 ? "1 minute" : `${s / 60} minutes`}
+                {s === 300 ? " (default)" : ""}
+              </option>
+            ))}
+          </select>
+        </FormField>
+        {canEdit ? (
+          <Button
+            disabled={!dirty || pending}
+            onClick={async () => {
+              setPending(true);
+              await save({ syncIntervalSeconds: Number(value) }, "Sync interval saved");
+              setPending(false);
+            }}
+          >
+            {pending ? <Loader2 className="animate-spin" aria-hidden /> : null}
+            Save
+          </Button>
+        ) : null}
       </div>
     </SettingsCard>
   );

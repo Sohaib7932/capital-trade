@@ -46,7 +46,9 @@ import {
   type PayoutRecord,
   type SettlementRecord,
   type Snapshot,
+  type SnapshotAccount,
 } from "./ledger";
+import { attachClientAccount, listAccounts, refreshFeePayout } from "./mt5";
 
 // --- Row mapping -------------------------------------------------------------
 
@@ -54,7 +56,12 @@ import {
 const utc = (column: string) => `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`;
 const TZ = "(SELECT business_timezone FROM settings WHERE id = 1)";
 
-const TRADE_JSON = `ticket, symbol, type, lots::text AS lots, ${utc("open_time")} AS "openTime",
+/** Trades with their account and client (pooled account: no client). */
+const TRADES = `(SELECT t.*, a.label AS account_label, a.linked_client_id AS client_id, c.full_name AS client_name
+    FROM trades t JOIN mt5_accounts a ON a.login = t.account_login LEFT JOIN clients c ON c.id = a.linked_client_id) trades`;
+
+const TRADE_JSON = `ticket, account_login AS "accountLogin", account_label AS "accountLabel", client_id AS "clientId",
+  client_name AS "clientName", symbol, type, lots::text AS lots, ${utc("open_time")} AS "openTime",
   ${utc("close_time")} AS "closeTime", open_price::text AS "openPrice", close_price::text AS "closePrice",
   profit::text AS profit, swap::text AS swap, commission::text AS commission`;
 
@@ -96,12 +103,12 @@ SELECT
      SELECT id, code, full_name AS "fullName", phone, email, ib_id AS "ibId", joined_at AS "joinedAt", status,
             split_trader::text, split_company::text, split_client::text, notes FROM clients) r) AS clients,
   (SELECT COALESCE(json_agg(r ORDER BY r.date, r.id), '[]') FROM (
-     SELECT id, client_id AS "clientId", type, amount::text AS amount, date, note FROM transactions) r) AS transactions,
+     SELECT id, client_id AS "clientId", type, amount::text AS amount, date, note, source FROM transactions) r) AS transactions,
   (SELECT COALESCE(json_agg(r), '[]') FROM (
      SELECT month, status, finalized_at, net_profit::text, total_capital::text, trading_days, lots::text, trades,
             company_adjustment::text, loss_handling FROM months) r) AS months,
   (SELECT COALESCE(json_agg(r), '[]') FROM (
-     SELECT month, party_type, party_id, amount::text, status, paid_at FROM payouts) r) AS payouts,
+     SELECT month, party_type, party_id, amount::text, status, paid_at, paid_amount::text FROM payouts) r) AS payouts,
   (SELECT COALESCE(json_agg(r), '[]') FROM (
      SELECT month, sum(net)::text AS net, sum(lots)::text AS lots, sum(trades)::int AS trades,
             count(*)::int AS "tradingDays", sum(pool_capital)::text AS "capitalDays"
@@ -118,6 +125,18 @@ SELECT
      SELECT split_trader::text, split_company::text, split_client::text, loss_handling, business_timezone, gold_symbols,
             ib_commissions_enabled, sync_interval_seconds
        FROM settings WHERE id = 1) r) AS settings,
+  (SELECT COALESCE(json_agg(r ORDER BY r.login), '[]') FROM (
+     SELECT id, login::text AS login, server, label, linked_client_id AS "clientId", is_active AS "isActive",
+            investor_password_enc IS NOT NULL AS "passwordSet", ${utc("last_sync_at")} AS "lastSyncAt",
+            last_sync_status AS "lastSyncStatus", last_error AS "lastError", last_error_kind AS "lastErrorKind",
+            balance::text AS balance, equity::text AS equity, floating_pl::text AS "floatingPl"
+       FROM mt5_accounts WHERE NOT is_demo) r) AS accounts,
+  (SELECT COALESCE(json_agg(r), '[]') FROM (
+     SELECT to_char(d.time AT TIME ZONE ${TZ}, 'YYYY-MM') AS month, a.linked_client_id AS "clientId",
+            COALESCE(sum(d.volume) FILTER (WHERE d.entry = 0), 0)::text AS lots
+       FROM mt5_deals d JOIN mt5_accounts a ON a.login = d.account_login AND a.is_active AND a.linked_client_id IS NOT NULL
+      WHERE is_gold_symbol(d.symbol, gold_symbols())
+      GROUP BY 1, 2) r) AS client_lots,
   ${MT5_SUMMARY_SQL} AS mt5`;
 
 type IBRow = Omit<IB, "commission" | "notes"> & { notes: string | null; commission_percent: string; commission_source: IBCommissionSource };
@@ -142,7 +161,17 @@ interface SnapshotRow {
     company_adjustment: string | null;
     loss_handling: LossHandling | null;
   }[];
-  payouts: { month: string; party_type: PartyType; party_id: string; amount: string | null; status: PayoutRecord["status"]; paid_at: string | null }[];
+  payouts: {
+    month: string;
+    party_type: PartyType;
+    party_id: string;
+    amount: string | null;
+    status: PayoutRecord["status"];
+    paid_at: string | null;
+    paid_amount: string;
+  }[];
+  accounts: (Omit<SnapshotAccount, "login"> & { login: string })[];
+  client_lots: { month: string; clientId: string; lots: string }[];
   pools: (MonthPool & { month: string })[];
   allocations: (MonthClientAllocation & { month: string })[];
   settlements: ({
@@ -192,6 +221,9 @@ export async function loadLedger(db: Queryable = pool()): Promise<Ledger> {
   // The current month is always there, even before it has a row (rows are created on write).
   months[currentMonth] ??= { status: "open" };
 
+  const clientLots: Snapshot["clientLots"] = {};
+  for (const r of data.client_lots) (clientLots[r.month] ??= {})[r.clientId] = r.lots;
+
   const allocations: Snapshot["allocations"] = {};
   for (const { month, ...a } of data.allocations) (allocations[month] ??= []).push(a);
 
@@ -228,15 +260,24 @@ export async function loadLedger(db: Queryable = pool()): Promise<Ledger> {
     payouts: Object.fromEntries(
       data.payouts.map((r) => [
         payoutKey(r.month, r.party_type, r.party_id),
-        { amount: orUndefined(r.amount), status: r.status, paidAt: orUndefined(r.paid_at) },
+        { amount: orUndefined(r.amount), status: r.status, paidAt: orUndefined(r.paid_at), paidAmount: r.paid_amount },
       ]),
     ),
     pools: Object.fromEntries(data.pools.map(({ month, ...p }) => [month, p])),
     allocations,
     settlements,
+    accounts: data.accounts.map((a) => ({ ...a, login: Number(a.login) })),
+    clientLots,
     ...settings,
     now,
   });
+}
+
+/** A client with their MT5 accounts' full details (status, errors, positions). */
+export async function getClientDetail(id: string, month?: MonthKey): Promise<ClientDetail | null> {
+  const [ledger, accountDetails] = await Promise.all([loadLedger(), listAccounts({ clientId: id })]);
+  const client = ledger.client(id, month);
+  return client ? { ...client, accountDetails } : null;
 }
 
 // --- Reads -------------------------------------------------------------------
@@ -273,6 +314,14 @@ function tradeWhere(filters: TradeFilters, params: unknown[]): string {
     params.push(filters.type);
     where.push(`type = $${params.length}`);
   }
+  if (filters.clientId) {
+    params.push(filters.clientId);
+    where.push(`client_id = $${params.length}`);
+  }
+  if (filters.accountLogin) {
+    params.push(filters.accountLogin);
+    where.push(`account_login = $${params.length}`);
+  }
   if (filters.from) {
     params.push(filters.from);
     where.push(`close_time >= $${params.length}::date::timestamp AT TIME ZONE ${TZ}`);
@@ -291,7 +340,7 @@ export async function getTradeDays(filters: TradeFilters): Promise<DailyPerforma
   const { rows } = await pool().query<Omit<DailyPerformance, "cumulative">>(
     `SELECT to_char((close_time AT TIME ZONE ${TZ})::date, 'YYYY-MM-DD') AS date,
             sum(profit + swap + commission)::text AS "netProfit", sum(lots)::text AS lots, count(*)::int AS trades
-       FROM trades ${where} GROUP BY 1 ORDER BY 1`,
+       FROM ${TRADES} ${where} GROUP BY 1 ORDER BY 1`,
     params,
   );
   return withCumulative(rows);
@@ -319,7 +368,7 @@ export async function getTradesPage(query: TradeQuery): Promise<TradePage> {
   const pageSize = query.pageSize ?? 25;
   params.push(pageSize, (query.page ?? 0) * pageSize);
   const { rows } = await pool().query<{ rows: Trade[] | null; summary: TradeSummary }>(
-    `WITH f AS (SELECT * FROM trades ${where})
+    `WITH f AS (SELECT * FROM ${TRADES} ${where})
      SELECT
        (SELECT json_agg(r) FROM (SELECT ${TRADE_JSON} FROM f ORDER BY ${order}
           LIMIT $${params.length - 1} OFFSET $${params.length}) r) AS rows,
@@ -338,7 +387,7 @@ export async function getTradesPage(query: TradeQuery): Promise<TradePage> {
 export async function getRecentTrades(month: MonthKey, limit = 5): Promise<Trade[]> {
   const { rows } = await pool().query<{ rows: Trade[] | null }>(
     `SELECT json_agg(r) AS rows FROM (
-       SELECT ${TRADE_JSON} FROM trades
+       SELECT ${TRADE_JSON} FROM ${TRADES}
         WHERE to_char(close_time AT TIME ZONE ${TZ}, 'YYYY-MM') = $1
         ORDER BY close_time DESC LIMIT $2) r`,
     [month, limit],
@@ -470,10 +519,10 @@ function validateSplit(split: SplitPercent): void {
 
 export async function createClient(user: SessionUser, input: CreateClientInput): Promise<ClientDetail> {
   validateSplit(input.split);
-  if (toDecimal(input.investedAmount).lessThanOrEqualTo(0)) throw badRequest("Invested amount must be greater than zero");
+  const logins = input.accounts.map((a) => a.login);
+  if (new Set(logins).size !== logins.length) throw badRequest("The same MT5 login is listed twice");
 
   const id = await transaction(async (tx) => {
-    await assertDateOpen(tx, input.investmentDate, "The investment date");
     if (input.ibId) {
       const ib = await tx.query("SELECT 1 FROM ibs WHERE id = $1 AND status = 'active'", [input.ibId]);
       if (!ib.rowCount) throw badRequest("Choose an active IB, or Direct");
@@ -483,40 +532,29 @@ export async function createClient(user: SessionUser, input: CreateClientInput):
     const n = await nextNumber(tx, "clients");
     const id = `cl-${String(n).padStart(3, "0")}`;
     const code = `CL-${String(n).padStart(4, "0")}`;
+    const name = input.fullName.trim();
     await tx.query(
       `INSERT INTO clients (id, code, full_name, phone, email, ib_id, joined_at, split_trader, split_company, split_client, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-      [
-        id,
-        code,
-        input.fullName.trim(),
-        input.phone.trim(),
-        input.email.trim(),
-        input.ibId,
-        input.investmentDate,
-        input.split.trader,
-        input.split.company,
-        input.split.client,
-        input.notes?.trim() || null,
-      ],
+       VALUES ($1, $2, $3, $4, $5, $6, (now() AT TIME ZONE ${TZ})::date, $7, $8, $9, $10)`,
+      [id, code, name, input.phone.trim(), input.email.trim(), input.ibId, input.split.trader, input.split.company, input.split.client, input.notes?.trim() || null],
     );
-    await tx.query(
-      `INSERT INTO transactions (id, client_id, type, amount, date, note)
-       VALUES ('tx-' || gen_random_uuid(), $1, 'deposit', $2, $3, 'Initial investment')`,
-      [id, toMoney(input.investedAmount), input.investmentDate],
-    );
-    await recomputeOpenMonths(tx);
+    let hadDeals = false;
+    for (const account of input.accounts) {
+      hadDeals = (await attachClientAccount(tx, user, { id, name }, account)) || hadDeals;
+    }
+    // A linked account that already has history now counts for this client.
+    if (hadDeals) await recomputeOpenMonths(tx);
     await audit(tx, user, {
       action: "client.create",
       entityType: "client",
       entityId: id,
-      summary: `Added client ${input.fullName.trim()} (${code}) with ${formatCurrency(input.investedAmount)}`,
-      details: { ...input },
+      summary: `Added client ${name} (${code})${input.ibId ? "" : ", Direct"} with ${input.accounts.length} MT5 account${input.accounts.length === 1 ? "" : "s"}`,
+      details: { ...input, accounts: input.accounts.map(({ login, server }) => ({ login, server, investorPassword: "(set)" })) },
     });
     return id;
   });
 
-  return (await loadLedger()).client(id)!;
+  return (await getClientDetail(id))!;
 }
 
 export async function updateClient(user: SessionUser, id: string, input: UpdateClientInput): Promise<ClientDetail> {
@@ -564,7 +602,7 @@ export async function updateClient(user: SessionUser, id: string, input: UpdateC
       ),
     });
   });
-  return (await loadLedger()).client(id)!;
+  return (await getClientDetail(id))!;
 }
 
 async function clientTransactions(db: Queryable, clientId: string): Promise<(TxnLike & { id: string })[]> {
@@ -582,6 +620,10 @@ export async function addTransaction(user: SessionUser, clientId: string, input:
       [clientId],
     );
     if (!client.rows[0]) throw notFound("Client not found");
+    const own = await tx.query("SELECT 1 FROM mt5_accounts WHERE linked_client_id = $1 AND NOT is_demo LIMIT 1", [clientId]);
+    if (own.rowCount) {
+      throw badRequest("This client's capital comes from their MT5 deposits and withdrawals — classify them under Cash events.");
+    }
     await assertDateOpen(tx, input.date);
     assertBalanceNeverNegative([...(await clientTransactions(tx, clientId)), input]);
     const { rows } = await tx.query<{ id: string }>(
@@ -598,16 +640,17 @@ export async function addTransaction(user: SessionUser, clientId: string, input:
       details: { clientId, ...input },
     });
   });
-  return (await loadLedger()).client(clientId)!;
+  return (await getClientDetail(clientId))!;
 }
 
 async function loadTransaction(db: Queryable, id: string) {
-  const { rows } = await db.query<TxnLike & { id: string; client_id: string; note: string | null; full_name: string }>(
-    `SELECT t.id, t.client_id, t.type, t.amount::text AS amount, to_char(t.date, 'YYYY-MM-DD') AS date, t.note, c.full_name
+  const { rows } = await db.query<TxnLike & { id: string; client_id: string; note: string | null; full_name: string; source: "manual" | "mt5" }>(
+    `SELECT t.id, t.client_id, t.type, t.amount::text AS amount, to_char(t.date, 'YYYY-MM-DD') AS date, t.note, t.source, c.full_name
        FROM transactions t JOIN clients c ON c.id = t.client_id WHERE t.id = $1 FOR UPDATE OF t`,
     [id],
   );
   if (!rows[0]) throw notFound("Transaction not found");
+  if (rows[0].source === "mt5") throw badRequest("This comes from an MT5 deposit or withdrawal. Reclassify the cash event instead.");
   return rows[0];
 }
 
@@ -638,7 +681,7 @@ export async function updateTransaction(user: SessionUser, id: string, input: Tr
     });
     return before.client_id;
   });
-  return (await loadLedger()).client(clientId)!;
+  return (await getClientDetail(clientId))!;
 }
 
 export async function deleteTransaction(user: SessionUser, id: string): Promise<ClientDetail> {
@@ -657,7 +700,7 @@ export async function deleteTransaction(user: SessionUser, id: string): Promise<
     });
     return before.client_id;
   });
-  return (await loadLedger()).client(clientId)!;
+  return (await getClientDetail(clientId))!;
 }
 
 // --- Writes: IBs ---------------------------------------------------------------
@@ -786,7 +829,7 @@ export async function freezeMonth(tx: Queryable, month: MonthKey): Promise<Month
   );
 
   const payouts = [
-    ...split.rows.map((r) => ({ party_type: "client", party_id: r.clientId, amount: r.payoutAmount })),
+    ...split.rows.map((r) => ({ party_type: r.payoutType, party_id: r.clientId, amount: r.payoutAmount })),
     ...split.partyPayouts.map((p) => ({ party_type: p.partyType, party_id: p.partyId, amount: p.amount })),
   ].filter((p) => toDecimal(p.amount).greaterThan(0));
   // A payout already marked paid (before a reopen) keeps its paid amount.
@@ -796,6 +839,8 @@ export async function freezeMonth(tx: Queryable, month: MonthKey): Promise<Month
      ON CONFLICT (month, party_type, party_id) DO UPDATE SET amount = EXCLUDED.amount WHERE payouts.status = 'pending'`,
     [month, JSON.stringify(payouts)],
   );
+  // Fee payments a client already made for this month now count against it.
+  for (const r of split.rows.filter((row) => row.payoutType === "fee")) await refreshFeePayout(tx, month, r.clientId);
   return split;
 }
 
@@ -869,8 +914,9 @@ export async function markPaid(user: SessionUser, month: MonthKey, partyType: Pa
 
 async function partyName(db: Queryable, partyType: PartyType, partyId: string): Promise<string> {
   if (partyType === "trader") return "the trader";
-  const table = partyType === "client" ? "clients" : "ibs";
-  const column = partyType === "client" ? "full_name" : "name";
+  const isClient = partyType === "client" || partyType === "fee";
+  const table = isClient ? "clients" : "ibs";
+  const column = isClient ? "full_name" : "name";
   const { rows } = await db.query<{ name: string }>(`SELECT ${column} AS name FROM ${table} WHERE id = $1`, [partyId]);
   return rows[0]?.name ?? partyId;
 }

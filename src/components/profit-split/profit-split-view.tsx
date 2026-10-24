@@ -13,7 +13,7 @@ import { PageHeader } from "@/components/shared/page-header";
 import { PersonCell } from "@/components/shared/person-cell";
 import { ProfitText } from "@/components/shared/profit-text";
 import { PageSkeleton } from "@/components/shared/skeletons";
-import { StatusBadge } from "@/components/shared/status-badge";
+import { Pill, StatusBadge } from "@/components/shared/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -60,8 +60,26 @@ function payReason(split: MonthlySplit, status: string, amount: string): string 
   return null;
 }
 
+/** Shown only while IB commissions are on. */
+const ibColumn = helper.accessor("ib", {
+  header: "IB comm.",
+  sortFn: "decimal",
+  meta: { align: "right" },
+  cell: (info) => (
+    <SplitAmount
+      value={info.getValue()}
+      pct={
+        info.row.original.ibCommission.percent
+          ? `${formatPercent(info.row.original.ibCommission.percent)}${info.row.original.ibCommission.source === "additional" ? " add." : ""}`
+          : "—"
+      }
+    />
+  ),
+});
+
 export function ProfitSplitView() {
-  const { month, dataVersion, notifyDataChanged, canEdit } = useApp();
+  const { month, dataVersion, notifyDataChanged, canEdit, settings } = useApp();
+  const ibOn = settings?.ibCommissionsEnabled ?? false;
   const { data: split, loading } = useAsync(() => getMonthlySplit(month!), [month, dataVersion], {
     enabled: month !== null,
     keepPreviousData: true,
@@ -110,25 +128,33 @@ export function ProfitSplitView() {
         </div>
       ),
     }),
-    helper.accessor("ibName", { header: "IB", cell: (info) => <span className="font-medium">{info.getValue()}</span> }),
-    helper.accessor("capital", {
-      header: "Avg. capital",
-      sortFn: "decimal",
-      meta: { align: "right" },
-      cell: (info) => (
-        <div className="leading-tight">
-          <p className="num font-semibold">{formatCurrency(info.getValue())}</p>
-          <p className="num text-xs text-muted-foreground">
-            {formatPercent(info.row.original.poolShare, { places: 2 })} · {info.row.original.activeDays}d
-          </p>
-        </div>
-      ),
+    helper.accessor("ibName", {
+      header: "Source",
+      cell: (info) =>
+        info.row.original.ibId ? <span className="font-medium">{info.getValue()}</span> : <Pill tone="gold">Direct</Pill>,
     }),
     helper.accessor("grossProfit", {
-      header: "Profit share",
+      header: "Net result",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <ProfitText value={info.getValue()} />,
+    }),
+    helper.accessor("carryIn", {
+      header: "Loss brought fwd",
+      sortFn: "decimal",
+      meta: { align: "right" },
+      cell: (info) =>
+        signOf(info.getValue()) < 0 ? (
+          <ProfitText value={info.getValue()} />
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        ),
+    }),
+    helper.accessor("splitBase", {
+      header: "Split base",
+      sortFn: "decimal",
+      meta: { align: "right" },
+      cell: (info) => <span className="num font-semibold">{formatCurrency(info.getValue())}</span>,
     }),
     helper.accessor("trader", {
       header: "Trader",
@@ -142,34 +168,39 @@ export function ProfitSplitView() {
       meta: { align: "right" },
       cell: (info) => <SplitAmount value={info.getValue()} pct={formatPercent(info.row.original.split.company)} />,
     }),
-    helper.accessor("ib", {
-      header: "IB comm.",
-      sortFn: "decimal",
-      meta: { align: "right" },
-      cell: (info) => (
-        <SplitAmount
-          value={info.getValue()}
-          pct={
-            info.row.original.ibCommission.percent
-              ? `${formatPercent(info.row.original.ibCommission.percent)}${info.row.original.ibCommission.source === "additional" ? " add." : ""}`
-              : "—"
-          }
-        />
-      ),
-    }),
+    ...(ibOn ? [ibColumn] : []),
     helper.accessor("client", {
       header: "Client",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <SplitAmount value={info.getValue()} pct={formatPercent(info.row.original.split.client)} strong />,
     }),
+    helper.accessor("carryOut", {
+      header: "Loss carried",
+      sortFn: "decimal",
+      meta: { align: "right" },
+      cell: (info) =>
+        signOf(info.getValue()) < 0 ? (
+          <ProfitText value={info.getValue()} />
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        ),
+    }),
     helper.accessor("payoutStatus", {
-      header: "Status",
+      header: "Payout / fee",
       cell: (info) => {
         const r = info.row.original;
         if (!finalized) return <StatusBadge status="open" />;
         if (signOf(r.payoutAmount) <= 0) return <span className="text-xs text-muted-foreground">Nothing due</span>;
-        return <StatusBadge status={r.payoutStatus} detail={r.paidAt ? formatDate(r.paidAt) : undefined} />;
+        return (
+          <div className="leading-tight">
+            <StatusBadge status={r.payoutStatus} detail={r.paidAt ? formatDate(r.paidAt) : undefined} />
+            <p className="num mt-1 text-xs text-muted-foreground">
+              {r.payoutType === "fee" ? "Fee due " : "To client "}
+              {formatCurrency(r.payoutAmount)}
+            </p>
+          </div>
+        );
       },
     }),
     helper.display({
@@ -178,7 +209,10 @@ export function ProfitSplitView() {
       meta: { align: "right" },
       cell: (info) => {
         const r = info.row.original;
-        return payButton({ partyType: "client", partyId: r.clientId, name: r.clientName, amount: r.payoutAmount }, r.payoutStatus);
+        return payButton(
+          { partyType: r.payoutType, partyId: r.clientId, name: r.clientName, amount: r.payoutAmount },
+          r.payoutStatus,
+        );
       },
     }),
   ];
@@ -189,7 +223,9 @@ export function ProfitSplitView() {
       cell: (info) => (
         <div className="leading-tight">
           <p className="font-semibold">{info.getValue()}</p>
-          <p className="text-xs text-muted-foreground">{info.row.original.partyType === "trader" ? "Trader share" : "IB commission"}</p>
+          <p className="text-xs text-muted-foreground">
+            {info.row.original.partyType === "trader" ? "Trader share" : "IB commission"}
+          </p>
         </div>
       ),
     }),
@@ -203,7 +239,10 @@ export function ProfitSplitView() {
       header: "Status",
       cell: (info) =>
         finalized ? (
-          <StatusBadge status={info.getValue()} detail={info.row.original.paidAt ? formatDate(info.row.original.paidAt) : undefined} />
+          <StatusBadge
+            status={info.getValue()}
+            detail={info.row.original.paidAt ? formatDate(info.row.original.paidAt) : undefined}
+          />
         ) : (
           <StatusBadge status="open" />
         ),
@@ -297,7 +336,13 @@ export function ProfitSplitView() {
               </TabsTrigger>
             </TabsList>
             <div className="md:ml-auto md:w-72">
-              <SearchInput id="split-search" label="Search clients" value={search} onChange={setSearch} placeholder="Search client or IB" />
+              <SearchInput
+                id="split-search"
+                label="Search clients"
+                value={search}
+                onChange={setSearch}
+                placeholder="Search client or IB"
+              />
             </div>
           </FilterBar>
           <TabsContent value="clients">
@@ -340,10 +385,13 @@ export function ProfitSplitView() {
           <div className="space-y-2">
             <p>
               This locks the split for <strong className="text-foreground">{split.rows.length} clients</strong> on a net profit of{" "}
-              <strong className="num text-foreground">{formatCurrency(split.netProfit, { signed: true })}</strong> and creates pending
-              payouts for clients, the trader and IBs.
+              <strong className="num text-foreground">{formatCurrency(split.netProfit, { signed: true })}</strong> and creates
+              pending payouts for clients, the trader and IBs.
             </p>
-            <p>After this, trades, transactions or settings changes won&apos;t alter this month. An admin can reopen it with a reason.</p>
+            <p>
+              After this, trades, transactions or settings changes won&apos;t alter this month. An admin can reopen it with a
+              reason.
+            </p>
           </div>
         }
         confirmLabel="Finalize month"
@@ -476,8 +524,8 @@ function SummaryStrip({ split }: { split: MonthlySplit }) {
           <p className="eyebrow">Total net profit</p>
           <ProfitText value={split.netProfit} className="mt-1 block text-2xl font-bold" />
           <p className="mt-1 text-xs text-muted-foreground">
-            Avg. <span className="num">{formatCurrency(split.totalCapital)}</span> pooled · <span className="num">{split.tradingDays}</span>{" "}
-            trading days
+            Avg. <span className="num">{formatCurrency(split.totalCapital)}</span> pooled ·{" "}
+            <span className="num">{split.tradingDays}</span> trading days
           </p>
         </div>
         <div className="hidden items-center px-3 text-muted-foreground lg:flex" aria-hidden>
@@ -488,7 +536,9 @@ function SummaryStrip({ split }: { split: MonthlySplit }) {
             <p className="eyebrow flex items-center gap-1.5">
               <span className={cn("size-2 rounded-full", p.dot)} aria-hidden />
               {p.label}{" "}
-              <span className="num normal-case">{signOf(base) > 0 ? formatPercent(percentOf(p.value, base, 2), { places: 2 }) : ""}</span>
+              <span className="num normal-case">
+                {signOf(base) > 0 ? formatPercent(percentOf(p.value, base, 2), { places: 2 }) : ""}
+              </span>
             </p>
             <p className="num mt-1 text-xl font-bold">{formatCurrency(p.value)}</p>
           </div>
@@ -505,8 +555,8 @@ function SummaryStrip({ split }: { split: MonthlySplit }) {
       {signOf(split.companyAdjustment) !== 0 ? (
         <p className="border-t px-5 py-3 text-xs text-muted-foreground">
           Company includes an adjustment of{" "}
-          <span className="num font-semibold text-foreground">{formatCurrency(split.companyAdjustment, { signed: true })}</span> (rounding
-          cents, and profit from days when no client had capital) so totals match the month&apos;s net exactly.
+          <span className="num font-semibold text-foreground">{formatCurrency(split.companyAdjustment, { signed: true })}</span>{" "}
+          (rounding cents, and profit from days when no client had capital) so totals match the month&apos;s net exactly.
         </p>
       ) : null}
     </Card>

@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useAsync } from "@/hooks/use-async";
 import { getIB } from "@/lib/api";
-import { formatCurrency } from "@/lib/calculations";
+import { formatCurrency, formatLots } from "@/lib/calculations";
 import { formatDate, formatMonth } from "@/lib/dates";
 import type { IBClientRow, IBDetail, MonthKey, Payout } from "@/lib/types";
 import { initials } from "@/lib/utils";
@@ -25,33 +25,56 @@ import { describeCommission, IBFormSheet } from "./ib-form-sheet";
 
 const helper = columnHelper<IBClientRow>();
 
-function buildColumns(month: MonthKey): DataTableColumn<IBClientRow>[] {
+function buildColumns(month: MonthKey, commissions: boolean): DataTableColumn<IBClientRow>[] {
+  const m = formatMonth(month, { short: true });
   return [
     helper.accessor("fullName", {
       header: "Client",
-      cell: (info) => <PersonCell name={info.getValue()} code={info.row.original.code} muted={info.row.original.status === "inactive"} />,
+      cell: (info) => (
+        <PersonCell name={info.getValue()} code={info.row.original.code} muted={info.row.original.status === "inactive"} />
+      ),
     }),
-    helper.accessor("joinedAt", { header: "Joined", cell: (info) => <span className="num text-xs">{formatDate(info.getValue())}</span> }),
+    helper.accessor("joinedAt", {
+      header: "Joined",
+      cell: (info) => <span className="num text-xs">{formatDate(info.getValue())}</span>,
+    }),
     helper.accessor("investedCapital", {
       header: "Capital",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <span className="num font-semibold">{formatCurrency(info.getValue())}</span>,
     }),
-    helper.accessor("monthProfit", {
-      header: `${formatMonth(month, { short: true })} result`,
+    helper.accessor("monthLots", {
+      header: `Lots · ${m}`,
+      sortFn: "decimal",
+      meta: { align: "right" },
+      cell: (info) => <span className="num">{formatLots(info.getValue())}</span>,
+    }),
+    helper.accessor("monthNetProfit", {
+      header: `Profit · ${m}`,
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <ProfitText value={info.getValue()} />,
     }),
     helper.accessor("totalProfit", {
-      header: "Total result",
+      header: "Client share · all time",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <ProfitText value={info.getValue()} />,
     }),
+    ...(commissions ? commissionColumns(m) : []),
+    helper.accessor("status", {
+      header: "Status",
+      enableSorting: false,
+      cell: (info) => <StatusBadge status={info.getValue()} />,
+    }),
+  ];
+}
+
+function commissionColumns(m: string): DataTableColumn<IBClientRow>[] {
+  return [
     helper.accessor("monthCommission", {
-      header: `Commission · ${formatMonth(month, { short: true })}`,
+      header: `Commission · ${m}`,
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => <span className="num text-gold-ink">{formatCurrency(info.getValue())}</span>,
@@ -62,13 +85,15 @@ function buildColumns(month: MonthKey): DataTableColumn<IBClientRow>[] {
       meta: { align: "right" },
       cell: (info) => <span className="num font-semibold text-gold-ink">{formatCurrency(info.getValue())}</span>,
     }),
-    helper.accessor("status", { header: "Status", enableSorting: false, cell: (info) => <StatusBadge status={info.getValue()} /> }),
   ];
 }
 
 const payoutHelper = columnHelper<Payout>();
 const payoutColumns: DataTableColumn<Payout>[] = [
-  payoutHelper.accessor("month", { header: "Month", cell: (info) => <span className="font-semibold">{formatMonth(info.getValue())}</span> }),
+  payoutHelper.accessor("month", {
+    header: "Month",
+    cell: (info) => <span className="font-semibold">{formatMonth(info.getValue())}</span>,
+  }),
   payoutHelper.accessor("amount", {
     header: "Commission",
     sortFn: "decimal",
@@ -77,7 +102,12 @@ const payoutColumns: DataTableColumn<Payout>[] = [
   }),
   payoutHelper.accessor("status", {
     header: "Status",
-    cell: (info) => <StatusBadge status={info.getValue()} detail={info.row.original.paidAt ? formatDate(info.row.original.paidAt) : undefined} />,
+    cell: (info) => (
+      <StatusBadge
+        status={info.getValue()}
+        detail={info.row.original.paidAt ? formatDate(info.row.original.paidAt) : undefined}
+      />
+    ),
   }),
 ];
 
@@ -108,7 +138,8 @@ export function IBDetailView() {
 
 function IBDetailContent({ ib, month }: { ib: IBDetail; month: MonthKey }) {
   const router = useRouter();
-  const { canEdit, notifyDataChanged } = useApp();
+  const { canEdit, notifyDataChanged, settings } = useApp();
+  const commissions = settings?.ibCommissionsEnabled ?? false;
   const [editing, setEditing] = useState(false);
 
   return (
@@ -118,7 +149,10 @@ function IBDetailContent({ ib, month }: { ib: IBDetail; month: MonthKey }) {
       <Card className="gap-0 px-5 py-5 sm:px-6">
         <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
           <div className="flex gap-4">
-            <span className="flex size-16 shrink-0 items-center justify-center rounded-xl bg-[#1c1a17] text-xl font-bold text-gold" aria-hidden>
+            <span
+              className="flex size-16 shrink-0 items-center justify-center rounded-xl bg-[#1c1a17] text-xl font-bold text-gold"
+              aria-hidden
+            >
               {initials(ib.name)}
             </span>
             <div className="min-w-0 space-y-2">
@@ -144,10 +178,12 @@ function IBDetailContent({ ib, month }: { ib: IBDetail; month: MonthKey }) {
                   <CalendarDays className="size-3.5" aria-label="Joined" />
                   Since <span className="num">{formatDate(ib.joinedAt)}</span>
                 </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <HandCoins className="size-3.5" aria-label="Commission rule" />
-                  {describeCommission(ib)}
-                </span>
+                {commissions ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <HandCoins className="size-3.5" aria-label="Commission rule" />
+                    {describeCommission(ib)}
+                  </span>
+                ) : null}
               </div>
               {ib.notes ? <p className="text-sm text-muted-foreground">{ib.notes}</p> : null}
             </div>
@@ -161,27 +197,44 @@ function IBDetailContent({ ib, month }: { ib: IBDetail; month: MonthKey }) {
       </Card>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <KpiCard label="Active clients" value={ib.clientCount} unit={`of ${ib.clients.length}`} footer={`Capital ${formatCurrency(ib.totalCapital)}`} />
         <KpiCard
-          label={`Clients' result · ${formatMonth(month, { short: true })}`}
-          value={<ProfitText value={ib.monthClientProfit} className="font-bold" />}
-          footer={<>All time <ProfitText value={ib.totalClientProfit} /></>}
+          label="Active clients"
+          value={ib.clientCount}
+          unit={`of ${ib.clients.length}`}
+          footer={`Capital ${formatCurrency(ib.totalCapital)}`}
         />
         <KpiCard
-          label={`Commission · ${formatMonth(month, { short: true })}`}
-          value={<span className="text-gold-ink">{formatCurrency(ib.monthCommission)}</span>}
-          footer={describeCommission(ib)}
+          label={`Clients' profit · ${formatMonth(month, { short: true })}`}
+          value={<ProfitText value={ib.monthNetProfit} className="font-bold" />}
+          footer={
+            <>
+              Client share all time <ProfitText value={ib.totalClientProfit} />
+            </>
+          }
         />
-        <KpiCard label="Commission · all time" value={formatCurrency(ib.totalCommission)} footer="Across every month" />
+        <KpiCard
+          label={`Lots · ${formatMonth(month, { short: true })}`}
+          value={formatLots(ib.monthLots)}
+          footer="Opened in their clients' accounts"
+        />
+        {commissions ? (
+          <KpiCard
+            label={`Commission · ${formatMonth(month, { short: true })}`}
+            value={<span className="text-gold-ink">{formatCurrency(ib.monthCommission)}</span>}
+            footer={`${describeCommission(ib)} · all time ${formatCurrency(ib.totalCommission)}`}
+          />
+        ) : (
+          <KpiCard label="Commission" value="Off" footer="IB commissions aren't enabled yet (Settings)." />
+        )}
       </div>
 
       <Card className="gap-0 py-0">
         <div className="border-b px-5 py-4">
           <h2 className="text-base font-bold">Clients introduced</h2>
-          <p className="text-xs text-muted-foreground">Everyone {ib.name} has brought into the pool.</p>
+          <p className="text-xs text-muted-foreground">Everyone {ib.name} has introduced.</p>
         </div>
         <DataTable
-          columns={buildColumns(month)}
+          columns={buildColumns(month, commissions)}
           data={ib.clients}
           getRowId={(c) => c.id}
           onRowClick={(c) => router.push(`/clients/${c.id}`)}
@@ -190,18 +243,28 @@ function IBDetailContent({ ib, month }: { ib: IBDetail; month: MonthKey }) {
         />
       </Card>
 
-      <Card className="gap-0 py-0">
-        <div className="border-b px-5 py-4">
-          <h2 className="text-base font-bold">Commission payouts</h2>
-          <p className="text-xs text-muted-foreground">Created when a month is finalized. Mark them paid on the Profit Split page.</p>
-        </div>
-        <DataTable
-          columns={payoutColumns}
-          data={ib.payouts}
-          getRowId={(p) => p.month}
-          empty={<EmptyState icon={HandCoins} title="No payouts yet" description="Commission payouts appear once a month with commission is finalized." />}
-        />
-      </Card>
+      {commissions ? (
+        <Card className="gap-0 py-0">
+          <div className="border-b px-5 py-4">
+            <h2 className="text-base font-bold">Commission payouts</h2>
+            <p className="text-xs text-muted-foreground">
+              Created when a month is finalized. Mark them paid on the Profit Split page.
+            </p>
+          </div>
+          <DataTable
+            columns={payoutColumns}
+            data={ib.payouts}
+            getRowId={(p) => p.month}
+            empty={
+              <EmptyState
+                icon={HandCoins}
+                title="No payouts yet"
+                description="Commission payouts appear once a month with commission is finalized."
+              />
+            }
+          />
+        </Card>
+      ) : null}
 
       {canEdit ? <IBFormSheet open={editing} onOpenChange={setEditing} ib={ib} onSaved={notifyDataChanged} /> : null}
     </div>

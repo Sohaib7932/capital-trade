@@ -3,7 +3,7 @@ import { admin, parseMonth, readJson } from "@/server/route";
 import { markPaid } from "@/server/store";
 
 const schema = z.object({
-  partyType: z.enum(["client", "trader", "ib"]),
+  partyType: z.enum(["client", "trader", "ib", "fee"]),
   partyId: z.string().min(1).max(40),
 });
 

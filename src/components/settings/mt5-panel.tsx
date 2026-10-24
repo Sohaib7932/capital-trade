@@ -1,13 +1,15 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { AlertTriangle, BadgeCheck, Eye, Info, Loader2, Pencil, Plus, Server, Trash2 } from "lucide-react";
+import { AlertTriangle, Info, Loader2, Pencil, Plus, Server, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { toast } from "sonner";
 import type { z } from "zod";
 import { useApp } from "@/components/layout/app-context";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { AccountStatus } from "@/components/shared/account-status";
+import { CashEventsTable } from "@/components/shared/cash-events-table";
 import { columnHelper, DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { DateTime } from "@/components/shared/date-time";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -15,7 +17,6 @@ import { describedBy, FormField } from "@/components/shared/form-field";
 import { ProfitText } from "@/components/shared/profit-text";
 import { TableSkeleton } from "@/components/shared/skeletons";
 import { Pill } from "@/components/shared/status-badge";
-import { SyncPill } from "@/components/shared/sync-pill";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -26,19 +27,16 @@ import { useAsync } from "@/hooks/use-async";
 import {
   createMt5Account,
   deleteMt5Account,
-  getCashEvents,
   getClients,
   getMt5Accounts,
   getMt5Positions,
   getSyncWarnings,
   resolveSyncWarning,
-  classifyCashEvent,
   updateMt5Account,
   type Mt5Position,
 } from "@/lib/api";
 import { formatCurrency, formatLots, formatPrice } from "@/lib/calculations";
-import { CASH_KIND_LABELS } from "@/lib/mt5";
-import type { CashEvent, Mt5Account } from "@/lib/types";
+import type { Mt5Account } from "@/lib/types";
 import { mt5AccountSchema } from "@/lib/validation";
 import { SettingsCard } from "./settings-card";
 
@@ -125,8 +123,14 @@ export function Mt5Panel() {
         if (a.isDemo) return <span className="text-xs text-muted-foreground">Seeded</span>;
         return (
           <div className="max-w-64 leading-tight">
-            <SyncPill health={a.health} lastSyncAt={a.lastSyncAt} prefix="" />
-            {a.lastSyncStatus === "error" && a.lastError ? (
+            <AccountStatus
+              syncState={a.syncState}
+              health={a.health}
+              lastSyncAt={a.lastSyncAt}
+              lastErrorKind={a.lastErrorKind}
+              lastError={a.lastError}
+            />
+            {a.lastSyncStatus === "error" && a.lastErrorKind !== "auth" && a.lastError ? (
               <p className="mt-1 text-xs whitespace-normal text-loss">{a.lastError}</p>
             ) : null}
           </div>
@@ -365,7 +369,7 @@ function AccountForm({ account, onCancel, onSaved }: { account?: Mt5Account; onC
         <FormField id="mt5-server" label="Server" error={errors.server?.message}>
           <Input
             id="mt5-server"
-            placeholder="BrokerName-Live"
+            placeholder="ECMarketsLtd-Live"
             aria-invalid={Boolean(errors.server)}
             aria-describedby={describedBy("mt5-server", errors.server?.message)}
             {...register("server")}
@@ -398,7 +402,22 @@ function AccountForm({ account, onCancel, onSaved }: { account?: Mt5Account; onC
           )}
         />
       </FormField>
-      <FormField id="mt5-client" label="Profit goes to" hint="The pooled account is shared by all clients by capital. Link a client only if this account trades just their money.">
+      <FormField
+        id="mt5-password"
+        label="Investor password"
+        error={errors.investorPassword?.message}
+        hint={account?.passwordSet ? "•••• set — leave empty to keep it." : "Read-only password; encrypted on save, never shown again."}
+      >
+        <Input
+          id="mt5-password"
+          type="password"
+          autoComplete="new-password"
+          aria-invalid={Boolean(errors.investorPassword)}
+          aria-describedby={describedBy("mt5-password", errors.investorPassword?.message, true)}
+          {...register("investorPassword", { setValueAs: (v: string) => (v === "" ? undefined : v) })}
+        />
+      </FormField>
+      <FormField id="mt5-client" label="Profit goes to" hint="Normally a client (their own account). The pool is shared by pool clients by capital.">
         <Controller
           control={control}
           name="linkedClientId"
@@ -531,97 +550,13 @@ function WarningsCard({ version, onChanged }: { version: number; onChanged: () =
 // --- Cash events ---------------------------------------------------------------------------
 
 function CashEventsCard({ version }: { version: number }) {
-  const { canEdit, dataVersion } = useApp();
-  const [onlyUnreviewed, setOnlyUnreviewed] = useState(true);
-  const [pagination, setPagination] = useState({ pageIndex: 0, pageSize: 10 });
-  const [local, setLocal] = useState(0);
-  const { data, loading } = useAsync(
-    () => getCashEvents({ page: pagination.pageIndex, pageSize: pagination.pageSize, unreviewed: onlyUnreviewed }),
-    [pagination.pageIndex, pagination.pageSize, onlyUnreviewed, dataVersion, version, local],
-    { keepPreviousData: true },
-  );
-
-  const helper = columnHelper<CashEvent>();
-  const columns: DataTableColumn<CashEvent>[] = [
-    helper.accessor("time", { header: "When", enableSorting: false, cell: (info) => <DateTime value={info.getValue()} className="text-xs" /> }),
-    helper.accessor("accountLabel", {
-      header: "Account",
-      enableSorting: false,
-      cell: (info) => (
-        <div className="leading-tight">
-          <p className="text-sm">{info.getValue()}</p>
-          <p className="num text-xs text-muted-foreground">deal #{info.row.original.dealTicket}</p>
-        </div>
-      ),
-    }),
-    helper.accessor("kind", { header: "Type", enableSorting: false, cell: (info) => <Pill tone="grey">{CASH_KIND_LABELS[info.getValue()] ?? info.getValue()}</Pill> }),
-    helper.accessor("amount", { header: "Amount", enableSorting: false, meta: { align: "right" }, cell: (info) => <ProfitText value={info.getValue()} /> }),
-    helper.accessor("comment", { header: "MT5 comment", enableSorting: false, cell: (info) => <span className="text-xs text-muted-foreground">{info.getValue() || "—"}</span> }),
-    helper.display({
-      id: "review",
-      header: "Review",
-      meta: { align: "right" },
-      cell: (info) => {
-        const e = info.row.original;
-        if (e.reviewedAt) {
-          return (
-            <span className="inline-flex items-center gap-1 text-xs text-profit-ink">
-              <BadgeCheck className="size-3.5" aria-hidden /> {e.reviewedBy}
-            </span>
-          );
-        }
-        if (!canEdit) return <span className="text-xs text-muted-foreground">Pending</span>;
-        return (
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={async () => {
-              try {
-                await classifyCashEvent({ accountLogin: e.accountLogin, dealTicket: e.dealTicket, classification: e.suggestedClass });
-                toast.success("Classified");
-                setLocal((v) => v + 1);
-              } catch (err) {
-                toast.error("Couldn't update", { description: errorText(err) });
-              }
-            }}
-          >
-            <Eye aria-hidden /> Reviewed
-          </Button>
-        );
-      },
-    }),
-  ];
-
   return (
     <SettingsCard
       wide
-      title="Account cash events"
-      description="Deposits, withdrawals, credit, bonuses and charges on the MT5 accounts. They are never trading profit and never change client capital automatically — record client deposits on the client's Transactions tab."
+      title="Cash events review"
+      description="Deposits, withdrawals and other balance operations on the MT5 accounts. Confirm each one: deposits and withdrawals become the client's capital, a fee payment pays the client's monthly fee. Never trading profit."
     >
-      <div className="flex items-center gap-2 border-b px-6 py-3">
-        <Checkbox
-          id="cash-unreviewed"
-          checked={onlyUnreviewed}
-          onCheckedChange={(v) => {
-            setOnlyUnreviewed(v === true);
-            setPagination((p) => ({ ...p, pageIndex: 0 }));
-          }}
-        />
-        <Label htmlFor="cash-unreviewed" className="text-sm font-normal">
-          Only show events that need review
-        </Label>
-      </div>
-      {data ? (
-        <DataTable
-          columns={columns}
-          data={data.rows}
-          getRowId={(e) => `${e.accountLogin}:${e.dealTicket}`}
-          server={{ rowCount: data.total, pagination, onPaginationChange: setPagination, sorting: [], onSortingChange: () => undefined, loading }}
-          empty={<EmptyState icon={BadgeCheck} title={onlyUnreviewed ? "Nothing to review" : "No cash events yet"} />}
-        />
-      ) : (
-        <TableSkeleton rows={3} columns={5} />
-      )}
+      <CashEventsTable version={version} />
     </SettingsCard>
   );
 }

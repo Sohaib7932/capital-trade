@@ -2,7 +2,7 @@
 
 import type { PaginationState, SortingState } from "@tanstack/react-table";
 import { Download, Loader2, Plus, Users } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useApp } from "@/components/layout/app-context";
@@ -13,17 +13,21 @@ import { PageHeader } from "@/components/shared/page-header";
 import { PersonCell } from "@/components/shared/person-cell";
 import { ProfitText } from "@/components/shared/profit-text";
 import { TableSkeleton } from "@/components/shared/skeletons";
-import { StatusBadge } from "@/components/shared/status-badge";
+import { SyncDot } from "@/components/shared/account-status";
+import { Pill, StatusBadge } from "@/components/shared/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useAsync } from "@/hooks/use-async";
 import { useDebounced } from "@/hooks/use-debounced";
 import { exportClients, getClients, getIBs } from "@/lib/api";
-import { formatCurrency, signOf } from "@/lib/calculations";
-import { formatDate, formatMonth } from "@/lib/dates";
-import type { ClientQuery, ClientSortKey, ClientStatus, ClientSummary, MonthKey } from "@/lib/types";
+import { formatCurrency, formatLots, signOf } from "@/lib/calculations";
+import { formatMonth } from "@/lib/dates";
+import type { ClientAccountBrief, ClientQuery, ClientSortKey, ClientStatus, ClientSummary, MonthKey } from "@/lib/types";
 
 const helper = columnHelper<ClientSummary>();
+
+const nullableMoney = (value: string | null) =>
+  value === null ? <span className="text-xs text-muted-foreground">—</span> : <span className="num">{formatCurrency(value)}</span>;
 
 function buildColumns(month: MonthKey): DataTableColumn<ClientSummary>[] {
   return [
@@ -33,37 +37,63 @@ function buildColumns(month: MonthKey): DataTableColumn<ClientSummary>[] {
         <PersonCell name={info.getValue()} code={info.row.original.code} muted={info.row.original.status === "inactive"} />
       ),
     }),
-    helper.accessor("phone", {
-      header: "Phone",
-      enableSorting: false,
-      cell: (info) => <span className="num text-xs text-muted-foreground">{info.getValue()}</span>,
+    helper.accessor("ibName", {
+      header: "Source",
+      cell: (info) =>
+        info.row.original.ibId ? <span className="font-medium">{info.getValue()}</span> : <Pill tone="gold">Direct</Pill>,
     }),
-    helper.accessor("ibName", { header: "IB", cell: (info) => <span className="font-medium">{info.getValue()}</span> }),
+    helper.accessor("accounts", {
+      header: "MT5 account(s)",
+      enableSorting: false,
+      cell: (info) => {
+        const accounts = info.getValue();
+        if (!accounts.length) return <span className="text-xs text-muted-foreground">Pool only</span>;
+        return (
+          <div className="flex items-center gap-1.5">
+            <SyncDot
+              health={info.row.original.syncHealth}
+              label={accounts.some((a: ClientAccountBrief) => a.syncState === "error") ? "A sync is failing — open the client" : undefined}
+            />
+            <span className="num text-xs">
+              {accounts[0].login}
+              {accounts.length > 1 ? ` +${accounts.length - 1}` : ""}
+            </span>
+          </div>
+        );
+      },
+    }),
     helper.accessor("investedCapital", {
-      header: "Invested capital",
+      header: "Capital",
       meta: { align: "right" },
       cell: (info) => <span className="num font-semibold">{formatCurrency(info.getValue())}</span>,
     }),
-    helper.accessor("joinedAt", {
-      header: "Join date",
-      cell: (info) => <span className="num text-xs">{formatDate(info.getValue())}</span>,
-    }),
-    helper.accessor("monthProfit", {
-      header: `${formatMonth(month, { short: true })} result`,
+    helper.accessor("balance", { header: "Balance", enableSorting: false, meta: { align: "right" }, cell: (info) => nullableMoney(info.getValue()) }),
+    helper.accessor("equity", { header: "Equity", enableSorting: false, meta: { align: "right" }, cell: (info) => nullableMoney(info.getValue()) }),
+    helper.accessor("floatingPl", {
+      header: "Floating P/L",
+      enableSorting: false,
       meta: { align: "right" },
-      cell: (info) => <ProfitText value={info.getValue()} />,
+      cell: (info) => (info.getValue() === null ? <span className="text-xs text-muted-foreground">—</span> : <ProfitText value={info.getValue()!} />),
     }),
-    helper.accessor("totalProfit", {
-      header: "Total result",
+    helper.accessor("monthNetProfit", {
+      header: `${formatMonth(month, { short: true })} profit`,
       meta: { align: "right" },
       cell: (info) => (
         <div className="leading-tight">
           <ProfitText value={info.getValue()} />
-          {signOf(info.row.original.carriedLoss) < 0 ? (
-            <p className="num text-[11px] text-loss">carrying {formatCurrency(info.row.original.carriedLoss)}</p>
-          ) : null}
+          <p className="num text-[11px] text-muted-foreground">{formatLots(info.row.original.monthLots)} lots</p>
         </div>
       ),
+    }),
+    helper.accessor("carriedLoss", {
+      header: "Loss to recover",
+      meta: { align: "right" },
+      cell: (info) =>
+        signOf(info.getValue()) < 0 ? (
+          <span className="num text-loss">{formatCurrency(info.getValue().replace("-", ""))}</span>
+        ) : (
+          <span className="text-xs text-muted-foreground">—</span>
+        ),
     }),
     helper.accessor("status", {
       header: "Status",
@@ -79,7 +109,7 @@ export function ClientsView() {
   const router = useRouter();
   const { month, dataVersion, openAddClient, canEdit } = useApp();
   const [search, setSearch] = useState("");
-  const [ibId, setIbId] = useState(ALL);
+  const [ibId, setIbId] = useState(useSearchParams().get("source") ?? ALL);
   const [status, setStatus] = useState(ALL);
   const [pagination, setPagination] = useState<PaginationState>(FIRST_PAGE);
   const [sorting, setSorting] = useState<SortingState>([{ id: "investedCapital", desc: true }]);
@@ -123,8 +153,8 @@ export function ClientsView() {
         title="Clients"
         description={
           page
-            ? `${page.total} ${filtersActive ? "matching " : ""}client${page.total === 1 ? "" : "s"} · ${formatCurrency(page.totalCapital)} invested`
-            : "Investors in the pool and the profit they've earned."
+            ? `${page.total} ${filtersActive ? "matching " : ""}client${page.total === 1 ? "" : "s"} · ${formatCurrency(page.totalCapital)} capital`
+            : "Investors, their MT5 accounts and the profit their accounts make."
         }
         actions={
           <>
@@ -154,13 +184,17 @@ export function ClientsView() {
           />
           <div className="flex gap-3 md:ml-auto">
             <FilterSelect
-              label="Filter by IB"
+              label="Filter by source"
               value={ibId}
               onChange={(v) => {
                 setIbId(v);
                 resetPage();
               }}
-              options={[{ value: ALL, label: "All IBs" }, ...(ibs ?? []).map((ib) => ({ value: ib.id, label: ib.name }))]}
+              options={[
+                { value: ALL, label: "All sources" },
+                { value: "direct", label: "Direct" },
+                ...(ibs ?? []).map((ib) => ({ value: ib.id, label: ib.name })),
+              ]}
             />
             <FilterSelect
               label="Filter by status"
@@ -201,7 +235,7 @@ export function ClientsView() {
                 <EmptyState
                   icon={Users}
                   title="No clients yet"
-                  description="Add your first investor to start tracking their capital and profit."
+                  description="Add a client with their EC Markets MT5 login and investor password."
                   action={
                     canEdit ? (
                       <Button onClick={openAddClient}>
@@ -214,7 +248,7 @@ export function ClientsView() {
             }
           />
         ) : (
-          <TableSkeleton rows={8} columns={8} />
+          <TableSkeleton rows={8} columns={9} />
         )}
       </Card>
     </div>

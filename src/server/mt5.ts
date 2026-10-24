@@ -1,6 +1,6 @@
 import { monthOf, monthStart, toISODate } from "@/lib/dates";
-import { syncHealth } from "@/lib/mt5";
-import type { CashClass, CashEvent, Mt5Account, Mt5AccountInput, Mt5SyncState, Paged, SyncWarning } from "@/lib/types";
+import { accountSyncState, syncHealth } from "@/lib/mt5";
+import type { CashClass, CashEvent, Mt5Account, Mt5AccountInput, Paged, SyncWarning } from "@/lib/types";
 import { recomputeMonths, type Queryable } from "./allocations";
 import { audit, diff } from "./audit";
 import type { SessionUser } from "./auth";
@@ -27,18 +27,11 @@ const ACCOUNT_SQL = `
          (SELECT count(*)::int FROM mt5_positions p WHERE p.account_login = a.login) AS "openPositions"
     FROM mt5_accounts a LEFT JOIN clients c ON c.id = a.linked_client_id`;
 
-function syncState(row: AccountRow): Mt5SyncState {
-  if (!row.isActive) return "paused";
-  if (row.lastSyncStatus === "error") return "error";
-  if (row.lastSyncAt) return "ok";
-  return row.passwordSet || row.isDemo ? "waiting" : "no_password";
-}
-
 function toAccount(row: AccountRow, now: Date): Mt5Account {
   return {
     ...row,
     login: Number(row.login),
-    syncState: syncState(row),
+    syncState: accountSyncState(row),
     health: row.isDemo ? "none" : syncHealth(row.lastSyncAt, row.lastSyncStatus, now),
   };
 }
@@ -48,10 +41,92 @@ function auditable({ investorPassword, ...input }: Mt5AccountInput) {
   return investorPassword ? { ...input, investorPassword: "(replaced)" } : input;
 }
 
-export async function listAccounts(): Promise<Mt5Account[]> {
-  const { rows } = await pool().query<AccountRow>(`${ACCOUNT_SQL} ORDER BY a.is_demo, a.label`);
+export async function listAccounts(filter: { clientId?: string } = {}): Promise<Mt5Account[]> {
+  const { rows } = await pool().query<AccountRow>(
+    `${ACCOUNT_SQL} WHERE ($1::text IS NULL OR a.linked_client_id = $1) ORDER BY a.is_demo, a.label`,
+    [filter.clientId ?? null],
+  );
   const now = new Date();
   return rows.map((r) => toAccount(r, now));
+}
+
+/** Broker clock for a new account: same as other accounts on that server, else UTC+3. */
+async function defaultOffset(db: Queryable, server: string): Promise<number> {
+  const { rows } = await db.query<{ offset: number }>(
+    `SELECT broker_timezone_offset_minutes AS offset FROM mt5_accounts
+      WHERE lower(server) = lower($1) AND NOT is_demo GROUP BY 1 ORDER BY count(*) DESC LIMIT 1`,
+    [server],
+  );
+  return rows[0]?.offset ?? 180;
+}
+
+export interface ClientAccountInput {
+  login: number;
+  server: string;
+  investorPassword: string;
+}
+
+/**
+ * Give a client an MT5 account, inside the caller's transaction. A new login is
+ * registered; an existing pooled account (no client yet) is linked to the client.
+ * The investor password is encrypted here and stored only as ciphertext.
+ * Returns true when the account already had deals (open months need recalculating).
+ */
+export async function attachClientAccount(
+  tx: Queryable,
+  user: SessionUser,
+  client: { id: string; name: string },
+  input: ClientAccountInput,
+): Promise<boolean> {
+  const encrypted = encryptInvestorPassword(input.investorPassword);
+  const server = input.server.trim();
+  const { rows } = await tx.query<{ id: string; linked_client_id: string | null; is_demo: boolean; owner: string | null; deals: number }>(
+    `SELECT a.id, a.linked_client_id, a.is_demo, c.full_name AS owner,
+            (SELECT count(*)::int FROM mt5_deals d WHERE d.account_login = a.login) AS deals
+       FROM mt5_accounts a LEFT JOIN clients c ON c.id = a.linked_client_id WHERE a.login = $1 FOR UPDATE OF a`,
+    [input.login],
+  );
+  const existing = rows[0];
+  if (existing?.is_demo) throw badRequest(`Login ${input.login} is the demo data account`);
+  if (existing?.linked_client_id && existing.linked_client_id !== client.id) {
+    throw conflict(`MT5 account ${input.login} already belongs to ${existing.owner ?? existing.linked_client_id}`);
+  }
+  const label = `${client.name} · ${input.login}`;
+  if (existing) {
+    await tx.query(
+      `UPDATE mt5_accounts SET linked_client_id = $2, server = $3, label = $4, is_active = true,
+              investor_password_enc = $5, password_updated_at = now()
+        WHERE id = $1`,
+      [existing.id, client.id, server, label, encrypted],
+    );
+  } else {
+    await tx.query(
+      `INSERT INTO mt5_accounts (label, login, server, broker_timezone_offset_minutes, linked_client_id, environment,
+                                 investor_password_enc, password_updated_at)
+       VALUES ($1, $2, $3, $4, $5, CASE WHEN $3 ILIKE '%demo%' THEN 'demo' ELSE 'live' END, $6, now())`,
+      [label, input.login, server, await defaultOffset(tx, server), client.id, encrypted],
+    );
+  }
+  await audit(tx, user, {
+    action: existing ? "mt5.account.link" : "mt5.account.create",
+    entityType: "mt5_account",
+    entityId: String(input.login),
+    summary: `${existing ? "Linked existing" : "Added"} MT5 account ${input.login} @ ${server} to ${client.name}`,
+    details: { login: input.login, server, clientId: client.id, investorPassword: "(set)" },
+  });
+  return (existing?.deals ?? 0) > 0;
+}
+
+/** Add an MT5 account to an existing client (client page → Add account). */
+export async function addClientAccount(user: SessionUser, clientId: string, input: ClientAccountInput): Promise<Mt5Account[]> {
+  await transaction(async (tx) => {
+    const { rows } = await tx.query<{ full_name: string }>("SELECT full_name FROM clients WHERE id = $1 FOR UPDATE", [clientId]);
+    if (!rows[0]) throw notFound("Client not found");
+    if (await attachClientAccount(tx, user, { id: clientId, name: rows[0].full_name }, input)) {
+      await recomputeMonths(tx, { today: monthOf(toISODate(new Date())) });
+    }
+  });
+  return listAccounts({ clientId });
 }
 
 async function getAccount(id: string): Promise<Mt5Account> {

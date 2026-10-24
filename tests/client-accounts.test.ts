@@ -246,3 +246,67 @@ describe("cash events", () => {
     await expect(classify(DEMO_LOGIN, await cashEvent(DEMO_LOGIN, "-100.00"), "fee_payment")).rejects.toThrow(/no unpaid fee/);
   });
 });
+
+describe("fees and summaries for own-account clients", () => {
+  it("finalizing creates the fee the client owes, and fee payments already made settle it", async () => {
+    await directClient("D", DEMO_LOGIN);
+    await db.trade("2026-10-14T13:11:48Z", "7234.84", DEMO_LOGIN);
+    await db.recompute(OCT);
+    // The client pays their share (2,170.45 + 361.74) before the month is locked.
+    await classify(DEMO_LOGIN, await cashEvent(DEMO_LOGIN, "-2532.19", "2026-10-20T07:00:00Z"), "fee_payment", OCT);
+
+    const open = (await db.ledger()).monthlySplit(OCT).rows[0];
+    expect(open).toMatchObject({ payoutType: "fee", payoutAmount: "2532.19", splitBase: "7234.84" });
+
+    await db.finalize(OCT);
+    const { rows } = await db.pg.query<{ party_type: string; amount: string; status: string; paid_via: string; paid_amount: string }>(
+      "SELECT party_type, amount::text, status, paid_via, paid_amount::text FROM payouts WHERE month = $1 ORDER BY party_type",
+      [OCT],
+    );
+    expect(rows).toEqual([
+      { party_type: "fee", amount: "2532.19", status: "paid", paid_via: "mt5", paid_amount: "2532.19" },
+      { party_type: "trader", amount: "2170.45", status: "pending", paid_via: null, paid_amount: "0.00" },
+    ]);
+    expect((await db.ledger()).monthlySplit(OCT).rows[0]).toMatchObject({ payoutType: "fee", payoutStatus: "paid", paidAmount: "2532.19" });
+  });
+
+  it("summarises a client's accounts, lots and month profit; Direct clients are grouped", async () => {
+    await directClient("D", 5001, 5002);
+    await db.pg.query("UPDATE mt5_accounts SET balance = 10500, equity = 10450, floating_pl = -50, last_sync_at = now(), last_sync_status = 'ok' WHERE login = 5001");
+    await db.trade("2026-10-05T10:00:00Z", "100.00", 5001);
+    await db.trade("2026-10-06T10:00:00Z", "50.00", 5002);
+    await classify(5001, await cashEvent(5001, "10000.00"), "deposit");
+    await db.recompute(OCT);
+
+    const ledger = await db.ledger();
+    const d = ledger.clients({ month: OCT }).rows[0];
+    expect(d).toMatchObject({
+      ibName: "Direct",
+      investedCapital: "10000.00",
+      balance: "10500.00",
+      equity: "10450.00",
+      floatingPl: "-50.00",
+      monthNetProfit: "150.00",
+      monthLots: "2.00",
+      syncHealth: "green",
+    });
+    expect(d.accounts.map((a) => [a.login, a.syncState])).toEqual([
+      [5001, "ok"],
+      [5002, "no_password"],
+    ]);
+    expect(ledger.directSummary(OCT)).toEqual({
+      clientCount: 1,
+      totalCapital: "10000.00",
+      monthLots: "2.00",
+      monthNetProfit: "150.00",
+      monthClientProfit: "97.50",
+    });
+    const stats = ledger.dashboard(OCT, []);
+    expect(stats).toMatchObject({ totalEquity: "10450.00", topClients: [{ id: "D", monthNetProfit: "150.00" }] });
+    // The helper's pooled account (1000) has no password either.
+    expect(stats.syncIssues.map((i) => [i.login, i.syncState])).toEqual([
+      [1000, "no_password"],
+      [5002, "no_password"],
+    ]);
+  });
+});

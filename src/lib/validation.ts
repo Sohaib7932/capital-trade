@@ -42,22 +42,32 @@ export const ibCommissionSchema = z.object({
   source: z.enum(["from_company_share", "additional"]),
 });
 
+/** EC Markets servers offered in the form; any exact server name is accepted. */
+export const MT5_SERVERS = ["ECMarketsLtd-Live", "ECMarketsLtd-Demo"] as const;
+
+export const clientAccountSchema = z.object({
+  login: z.number({ error: "Enter the MT5 login" }).int().positive("Enter the MT5 login").max(Number.MAX_SAFE_INTEGER),
+  server: z.string().trim().min(2, "Enter the server name exactly as in MT5").max(100),
+  investorPassword: z.string().min(1, "Enter the investor password").max(64, "At most 64 characters"),
+});
+
 export const createClientSchema = z.object({
   fullName: z.string().trim().min(2, "Enter the client's full name"),
   phone: phoneSchema,
   email: emailSchema,
-  ibId: z.string().min(1, "Choose the IB who introduced this client"),
-  investedAmount: moneySchema,
-  investmentDate: isoDateSchema,
+  /** Null = Direct (company) client. */
+  ibId: z.string().min(1).nullable(),
   split: splitSchema,
   notes: notesSchema,
+  accounts: z.array(clientAccountSchema).max(20),
 });
 
 export const updateClientSchema = z.object({
   fullName: z.string().trim().min(2, "Enter the client's full name"),
   phone: phoneSchema,
   email: emailSchema,
-  ibId: z.string().min(1, "Choose an IB"),
+  /** Null = Direct (company) client. */
+  ibId: z.string().min(1).nullable(),
   status: z.enum(["active", "inactive"]),
   split: splitSchema,
   notes: notesSchema,
@@ -84,6 +94,8 @@ export const tradeFilterSchema = z.object({
   from: isoDateSchema.optional(),
   to: isoDateSchema.optional(),
   type: z.enum(["buy", "sell"]).optional(),
+  clientId: z.string().max(40).optional(),
+  accountLogin: z.coerce.number().int().positive().optional(),
 });
 
 /** Write-only: encrypted on arrival, never stored or logged in plain text. Not trimmed (spaces may be part of it). */

@@ -22,6 +22,18 @@ const ticket = helper.accessor("ticket", {
   header: "Ticket",
   cell: (info) => <span className="num font-semibold">#{info.getValue()}</span>,
 });
+/** Client (or "Pool") with the MT5 login underneath. */
+export const accountColumn = helper.accessor("accountLogin", {
+  header: "Client / account",
+  enableSorting: false,
+  cell: (info) => (
+    <div className="leading-tight">
+      <p className="max-w-40 truncate text-sm font-medium">{info.row.original.clientName ?? "Pool"}</p>
+      <p className="num text-xs text-muted-foreground">{info.getValue()}</p>
+    </div>
+  ),
+});
+
 const symbol = helper.accessor("symbol", { header: "Symbol", enableSorting: false, cell: (info) => <SymbolCell symbol={info.getValue()} /> });
 const type = helper.accessor("type", { header: "Type", cell: (info) => <TradeTypeBadge type={info.getValue()} /> });
 const lots = helper.accessor("lots", {
@@ -71,6 +83,7 @@ export const recentTradeColumns: DataTableColumn<Trade>[] = [
       </div>
     ),
   }),
+  accountColumn,
   { ...symbol, enableSorting: false },
   { ...type, enableSorting: false },
   { ...lots, enableSorting: false },
@@ -81,6 +94,7 @@ export const recentTradeColumns: DataTableColumn<Trade>[] = [
 
 export const tradeColumns: DataTableColumn<Trade>[] = [
   ticket,
+  accountColumn,
   helper.accessor("openTime", {
     header: "Open time",
     cell: (info) => <DateTime value={info.getValue()} className="text-xs text-muted-foreground" />,

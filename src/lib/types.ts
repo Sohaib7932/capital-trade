@@ -23,7 +23,8 @@ export type TransactionType = "deposit" | "withdrawal";
 /** What happens to a client's losing month: carry it until recovered, or start fresh each month. */
 export type LossHandling = "carry_forward" | "reset_monthly";
 export type Role = "admin" | "viewer";
-export type PartyType = "client" | "trader" | "ib";
+/** "fee" = owed by a client with their own account (trader + company share). */
+export type PartyType = "client" | "trader" | "ib" | "fee";
 export type SortDirection = "asc" | "desc";
 
 /** Percentages of net profit. Must add up to exactly 100. */
@@ -80,6 +81,10 @@ export interface IB {
 export interface IBSummary extends IB {
   clientCount: number;
   totalCapital: DecimalString;
+  /** Lots traded this month in their clients' accounts. */
+  monthLots: DecimalString;
+  /** Net trading profit of their clients this month (before the split). */
+  monthNetProfit: DecimalString;
   /** Client results this month for this IB's clients. */
   monthClientProfit: DecimalString;
   monthCommission: DecimalString;
@@ -96,6 +101,15 @@ export interface IBDetail extends IBSummary {
   clients: IBClientRow[];
   /** This IB's commission payout per finalized month, newest first. */
   payouts: Payout[];
+}
+
+/** Clients without an IB (the company's own), summarised like an IB. */
+export interface DirectSummary {
+  clientCount: number;
+  totalCapital: DecimalString;
+  monthLots: DecimalString;
+  monthNetProfit: DecimalString;
+  monthClientProfit: DecimalString;
 }
 
 export interface IBInput {
@@ -141,6 +155,29 @@ export interface ClientSummary extends Client {
   totalProfit: DecimalString;
   /** Loss not yet recovered (≤ 0), carried into the next month. "0.00" if none. */
   carriedLoss: DecimalString;
+  /** The client's own MT5 accounts. */
+  accounts: ClientAccountBrief[];
+  /** Sums over the client's accounts; null when the client has none (or none synced yet). */
+  balance: DecimalString | null;
+  equity: DecimalString | null;
+  floatingPl: DecimalString | null;
+  /** Net trading profit of the client's accounts this month (before the split). */
+  monthNetProfit: DecimalString;
+  monthLots: DecimalString;
+  /** Worst sync health across the client's active accounts ("none" if no accounts). */
+  syncHealth: SyncHealth;
+}
+
+/** An MT5 account as shown in client lists. */
+export interface ClientAccountBrief {
+  id: string;
+  login: number;
+  server: string;
+  syncState: Mt5SyncState;
+  health: SyncHealth;
+  balance: DecimalString | null;
+  equity: DecimalString | null;
+  floatingPl: DecimalString | null;
 }
 
 export interface Transaction {
@@ -151,6 +188,8 @@ export interface Transaction {
   /** Effective date. A deposit earns from the next day; a withdrawal stops earning on this day. */
   date: ISODate;
   note?: string;
+  /** "mt5": made by classifying a cash event (change it there); "manual": typed in (pool clients). */
+  source: "manual" | "mt5";
   /** True when the date falls in or before a finalized month — it can no longer change. */
   locked: boolean;
 }
@@ -166,6 +205,10 @@ export interface TransactionInput {
 export interface ClientMonthRecord extends SplitAmounts {
   month: MonthKey;
   monthStatus: MonthStatus;
+  /** Profit above any loss being recovered — the amount that is split (0 if none). */
+  splitBase: DecimalString;
+  /** "fee": the client keeps profit in their own account and owes the shares; "client": paid out to the client. */
+  payoutType: "client" | "fee";
   /** Average active capital across the month's trading days. */
   capital: DecimalString;
   /** Client's portion of the pool's net profit, before the split. */
@@ -182,6 +225,8 @@ export interface ClientMonthRecord extends SplitAmounts {
 }
 
 export interface ClientDetail extends ClientSummary {
+  /** Full account details (status, errors, positions count). */
+  accountDetails: Mt5Account[];
   history: ClientMonthRecord[];
   transactions: Transaction[];
 }
@@ -192,10 +237,17 @@ export interface CreateClientInput {
   email: string;
   /** Null = Direct client. */
   ibId: string | null;
-  investedAmount: DecimalString;
-  investmentDate: ISODate;
   split: SplitPercent;
   notes?: string;
+  /** The client's MT5 accounts. Capital comes from their deposits once synced. */
+  accounts: NewClientAccount[];
+}
+
+export interface NewClientAccount {
+  login: number;
+  server: string;
+  /** Write-only; encrypted on arrival. */
+  investorPassword: string;
 }
 
 export interface UpdateClientInput {
@@ -209,7 +261,15 @@ export interface UpdateClientInput {
   notes?: string;
 }
 
-export type ClientSortKey = "fullName" | "ibName" | "investedCapital" | "joinedAt" | "monthProfit" | "totalProfit";
+export type ClientSortKey =
+  | "fullName"
+  | "ibName"
+  | "investedCapital"
+  | "joinedAt"
+  | "monthProfit"
+  | "monthNetProfit"
+  | "totalProfit"
+  | "carriedLoss";
 
 export interface ClientQuery {
   search?: string;
@@ -235,6 +295,11 @@ export interface ClientPage extends Paged<ClientSummary> {
 
 export interface Trade {
   ticket: number;
+  accountLogin: number;
+  accountLabel: string;
+  /** Null for the pooled account. */
+  clientId: string | null;
+  clientName: string | null;
   symbol: string;
   type: TradeType;
   lots: DecimalString;
@@ -268,6 +333,8 @@ export interface TradeFilters {
   /** Inclusive, by close date in the business timezone. */
   to?: ISODate;
   type?: TradeType;
+  clientId?: string;
+  accountLogin?: number;
 }
 
 export interface TradeQuery extends TradeFilters {
@@ -325,9 +392,15 @@ export interface ClientSplitRow extends SplitAmounts {
   carryIn: DecimalString;
   /** Unrecovered loss carried out (≤ 0). */
   carryOut: DecimalString;
+  /** Profit above any loss being recovered — the amount that is split (0 if none). */
+  splitBase: DecimalString;
+  /** "fee": the client keeps profit in their own account and owes trader + company (+ IB); "client": paid to the client. */
+  payoutType: "client" | "fee";
   payoutStatus: PayoutStatus;
-  /** Amount due/paid to the client (never negative). */
+  /** Client payout (never negative), or the fee the client owes. */
   payoutAmount: DecimalString;
+  /** Fee payments received so far (fee payouts). */
+  paidAmount: DecimalString;
   paidAt?: ISODate;
 }
 
@@ -576,6 +649,36 @@ export interface DashboardStats {
   totalIbs: number;
   distribution: SplitAmounts;
   recentTrades: Trade[];
+  /** Live sums over client accounts (last sync). */
+  totalBalance: DecimalString;
+  totalEquity: DecimalString;
+  floatingPl: DecimalString;
+  /** Best clients by net trading profit this month. */
+  topClients: TopClient[];
+  /** Accounts that are amber/red, failing, or waiting for their first sync. */
+  syncIssues: SyncIssue[];
+}
+
+export interface TopClient {
+  id: string;
+  fullName: string;
+  ibName: string;
+  monthNetProfit: DecimalString;
+  monthLots: DecimalString;
+  equity: DecimalString | null;
+}
+
+export interface SyncIssue {
+  accountId: string;
+  login: number;
+  server: string;
+  clientId: string | null;
+  clientName: string | null;
+  health: SyncHealth;
+  syncState: Mt5SyncState;
+  lastSyncAt: ISODateTime | null;
+  lastError: string | null;
+  lastErrorKind: "auth" | "other" | null;
 }
 
 export interface GoldSpot {

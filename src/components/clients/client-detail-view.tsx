@@ -1,11 +1,12 @@
 "use client";
 
-import { CalendarDays, FileDown, FileText, Loader2, Lock, Mail, Network, Pencil, Phone, Plus, Trash2, UserX } from "lucide-react";
+import { ArrowLeftRight, CalendarDays, FileDown, FileText, Loader2, Lock, Mail, Network, Pencil, Phone, Plus, Trash2, UserX } from "lucide-react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useApp } from "@/components/layout/app-context";
+import { CashEventsTable } from "@/components/shared/cash-events-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { columnHelper, DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { EmptyState } from "@/components/shared/empty-state";
@@ -15,17 +16,19 @@ import { ProfitText } from "@/components/shared/profit-text";
 import { PageSkeleton } from "@/components/shared/skeletons";
 import { SplitBar } from "@/components/shared/split-bar";
 import { Pill, StatusBadge } from "@/components/shared/status-badge";
+import { recentTradeColumns } from "@/components/trades/trade-columns";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAsync } from "@/hooks/use-async";
-import { deleteTransaction, downloadStatement, getClient, markPaid } from "@/lib/api";
-import { formatCurrency, formatPercent, percentOf, signOf, sum, sumMoney, toDecimal, toMoney } from "@/lib/calculations";
+import { deleteTransaction, downloadStatement, getClient, getTrades, markPaid } from "@/lib/api";
+import { formatCurrency, formatLots, formatPercent, percentOf, signOf, sum, sumMoney, toDecimal, toMoney } from "@/lib/calculations";
 import { formatDate, formatMonth } from "@/lib/dates";
 import type { ClientDetail, ClientMonthRecord, MonthKey, Transaction } from "@/lib/types";
 import { initials } from "@/lib/utils";
+import { ClientAccounts } from "./client-accounts";
 import { ClientFormSheet } from "./client-form-sheet";
 import { TransactionDialog } from "./transaction-dialog";
 
@@ -111,10 +114,14 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
                     {client.email}
                   </a>
                 </Meta>
-                <Meta icon={Network} label="IB">
-                  <Link href={`/ibs/${client.ibId}`} className="font-medium text-gold-ink hover:underline">
-                    {client.ibName}
-                  </Link>
+                <Meta icon={Network} label="Source">
+                  {client.ibId ? (
+                    <Link href={`/ibs/${client.ibId}`} className="font-medium text-gold-ink hover:underline">
+                      {client.ibName}
+                    </Link>
+                  ) : (
+                    <span className="font-medium text-foreground">Direct</span>
+                  )}
                 </Meta>
                 <Meta icon={CalendarDays} label="Joined">
                   <span className="num">{formatDate(client.joinedAt)}</span>
@@ -137,15 +144,17 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
         </div>
       </Card>
 
+      <ClientAccounts client={client} onChanged={onChanged} />
+
       {signOf(client.carriedLoss) < 0 ? (
         <div
           role="status"
           className="flex flex-col gap-1 rounded-xl border border-loss/25 bg-loss-soft px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
         >
           <div>
-            <p className="text-sm font-semibold text-loss">Carried-forward loss</p>
+            <p className="text-sm font-semibold text-loss">Loss to recover</p>
             <p className="text-xs text-muted-foreground">
-              No trader, company or IB share is taken from this client until it is recovered.
+              Nothing is split until this is recovered; after that, only profit above it is split.
             </p>
           </div>
           <ProfitText value={client.carriedLoss} className="text-xl font-bold" />
@@ -154,19 +163,25 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <KpiCard
-          label="Invested capital"
+          label="Capital"
           value={formatCurrency(client.investedCapital)}
           badge={<Pill tone="grey">Not split</Pill>}
           footer={
-            <>
-              Total deposited <span className="num font-semibold text-foreground">{formatCurrency(deposits)}</span> · from
-              transactions only
-            </>
+            client.accounts.length ? (
+              <>
+                Balance <span className="num font-semibold text-foreground">{client.balance ? formatCurrency(client.balance) : "—"}</span> ·
+                Equity <span className="num font-semibold text-foreground">{client.equity ? formatCurrency(client.equity) : "—"}</span>
+              </>
+            ) : (
+              <>
+                Total deposited <span className="num font-semibold text-foreground">{formatCurrency(deposits)}</span>
+              </>
+            )
           }
         />
         <KpiCard
-          label={`${formatMonth(month)} · client result`}
-          value={<ProfitText value={current?.client ?? "0"} className="font-bold" />}
+          label={`${formatMonth(month)} · net trading result`}
+          value={<ProfitText value={client.monthNetProfit} className="font-bold" />}
           badge={
             current && signOf(current.client) > 0 && signOf(current.capital) > 0 ? (
               <Pill tone="green">{formatPercent(percentOf(current.client, current.capital, 2), { signed: true, places: 2 })}</Pill>
@@ -177,8 +192,8 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
             current ? (
               <div className="space-y-2">
                 <p>
-                  From <span className="num font-semibold text-foreground">{formatCurrency(current.grossProfit)}</span> gross
-                  profit on capital
+                  <span className="num font-semibold text-foreground">{formatLots(client.monthLots)}</span> lots · client share{" "}
+                  <span className="num font-semibold text-foreground">{formatCurrency(current.client)}</span>
                   {signOf(current.carryIn) < 0 ? (
                     <>
                       , after recovering <span className="num font-semibold text-foreground">{formatCurrency(current.carryIn)}</span>{" "}
@@ -190,7 +205,7 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
                 <SplitBar split={current.split} />
               </div>
             ) : (
-              "No capital in the pool on this month's trading days."
+              `${formatLots(client.monthLots)} lots · no closed trades this month.`
             )
           }
         />
@@ -212,19 +227,31 @@ function ClientDetailContent({ client, month, onChanged }: { client: ClientDetai
           <div className="flex flex-col gap-3 border-b px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h2 className="text-base font-bold">History</h2>
-              <p className="text-xs text-muted-foreground">Profit allocated each month and money moved in or out.</p>
+              <p className="text-xs text-muted-foreground">Monthly split with losses carried forward, trades, and money in or out.</p>
             </div>
             <TabsList>
               <TabsTrigger value="monthly" className="px-3">
                 Monthly breakdown
               </TabsTrigger>
+              <TabsTrigger value="trades" className="px-3">
+                Trades
+              </TabsTrigger>
+              <TabsTrigger value="cash" className="px-3">
+                Cash events
+              </TabsTrigger>
               <TabsTrigger value="transactions" className="px-3">
-                Transactions
+                Capital
               </TabsTrigger>
             </TabsList>
           </div>
           <TabsContent value="monthly">
             <MonthlyBreakdown client={client} onChanged={onChanged} statement={statement} />
+          </TabsContent>
+          <TabsContent value="trades">
+            <ClientTrades client={client} />
+          </TabsContent>
+          <TabsContent value="cash">
+            <CashEventsTable clientId={client.id} />
           </TabsContent>
           <TabsContent value="transactions">
             <Transactions client={client} onChanged={onChanged} />
@@ -261,7 +288,8 @@ function MonthlyBreakdown({
   onChanged: () => void;
   statement: ReturnType<typeof useStatementDownload>;
 }) {
-  const { canEdit } = useApp();
+  const { canEdit, settings } = useApp();
+  const ibOn = settings?.ibCommissionsEnabled ?? false;
   const [confirming, setConfirming] = useState<ClientMonthRecord | null>(null);
 
   const columns: DataTableColumn<ClientMonthRecord>[] = [
@@ -276,14 +304,21 @@ function MonthlyBreakdown({
         </div>
       ),
     }),
-    monthHelper.accessor("capital", {
-      header: "Avg. capital",
+    monthHelper.accessor("grossProfit", {
+      header: "Net result",
       sortFn: "decimal",
       meta: { align: "right" },
-      cell: (info) => money(info.getValue(), "text-muted-foreground"),
+      cell: (info) => <ProfitText value={info.getValue()} className="font-semibold" />,
     }),
-    monthHelper.accessor("grossProfit", {
-      header: "Gross",
+    monthHelper.accessor("carryIn", {
+      header: "Loss brought fwd",
+      sortFn: "decimal",
+      meta: { align: "right" },
+      cell: (info) =>
+        signOf(info.getValue()) < 0 ? <ProfitText value={info.getValue()} /> : <span className="text-xs text-muted-foreground">—</span>,
+    }),
+    monthHelper.accessor("splitBase", {
+      header: "Split base",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) => money(info.getValue(), "font-semibold"),
@@ -310,12 +345,16 @@ function MonthlyBreakdown({
         </div>
       ),
     }),
-    monthHelper.accessor("ib", {
-      header: "IB",
-      sortFn: "decimal",
-      meta: { align: "right" },
-      cell: (info) => money(info.getValue(), "text-muted-foreground"),
-    }),
+    ...(ibOn
+      ? [
+          monthHelper.accessor("ib", {
+            header: "IB",
+            sortFn: "decimal",
+            meta: { align: "right" },
+            cell: (info) => money(info.getValue(), "text-muted-foreground"),
+          }),
+        ]
+      : []),
     monthHelper.accessor("client", {
       header: "Client",
       sortFn: "decimal",
@@ -323,14 +362,14 @@ function MonthlyBreakdown({
       cell: (info) => <ProfitText value={info.getValue()} signed={false} className="text-gold-ink" />,
     }),
     monthHelper.accessor("carryOut", {
-      header: "Carried loss",
+      header: "Loss carried",
       sortFn: "decimal",
       meta: { align: "right" },
       cell: (info) =>
         signOf(info.getValue()) < 0 ? <ProfitText value={info.getValue()} /> : <span className="text-xs text-muted-foreground">—</span>,
     }),
     monthHelper.accessor("payoutStatus", {
-      header: "Payout",
+      header: "Payout / fee",
       cell: (info) => {
         const r = info.row.original;
         if (r.monthStatus === "open") return <StatusBadge status="open" detail="in progress" />;
@@ -338,7 +377,10 @@ function MonthlyBreakdown({
         return (
           <div className="leading-tight">
             <StatusBadge status={r.payoutStatus} detail={r.paidAt ? formatDate(r.paidAt) : undefined} />
-            <p className="num mt-1 text-xs text-muted-foreground">{formatCurrency(r.payoutAmount)}</p>
+            <p className="num mt-1 text-xs text-muted-foreground">
+              {r.payoutType === "fee" ? "Fee due " : "To client "}
+              {formatCurrency(r.payoutAmount)}
+            </p>
           </div>
         );
       },
@@ -378,11 +420,12 @@ function MonthlyBreakdown({
       <TableCell className="font-bold">
         Total <span className="font-normal text-muted-foreground">({h.length} months)</span>
       </TableCell>
-      <TableCell />
       <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.grossProfit)))}</TableCell>
+      <TableCell />
+      <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.splitBase)))}</TableCell>
       <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.trader)))}</TableCell>
       <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.company)))}</TableCell>
-      <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.ib)))}</TableCell>
+      {ibOn ? <TableCell className="num text-right">{formatCurrency(sumMoney(h.map((r) => r.ib)))}</TableCell> : null}
       <TableCell className="num text-right text-gold-ink">{formatCurrency(sumMoney(h.map((r) => r.client)))}</TableCell>
       <TableCell colSpan={3} />
     </TableRow>
@@ -399,28 +442,36 @@ function MonthlyBreakdown({
           <EmptyState
             icon={FileText}
             title="No months yet"
-            description="A deposit earns from the day after its effective date, on days the pool trades."
+            description="Months appear once the client's accounts have closed trades."
           />
         }
       />
       <ConfirmDialog
         open={confirming !== null}
         onOpenChange={(open) => !open && setConfirming(null)}
-        title="Mark payout as paid?"
+        title={confirming?.payoutType === "fee" ? "Mark fee as received?" : "Mark payout as paid?"}
         description={
           confirming ? (
-            <>
-              Record that <strong className="text-foreground">{client.fullName}</strong> was paid{" "}
-              <strong className="num text-foreground">{formatCurrency(confirming.payoutAmount)}</strong> for{" "}
-              {formatMonth(confirming.month)}.
-            </>
+            confirming.payoutType === "fee" ? (
+              <>
+                Record that <strong className="text-foreground">{client.fullName}</strong> paid their{" "}
+                <strong className="num text-foreground">{formatCurrency(confirming.payoutAmount)}</strong> share for{" "}
+                {formatMonth(confirming.month)}. (Fee payments seen in MT5 mark this automatically once classified.)
+              </>
+            ) : (
+              <>
+                Record that <strong className="text-foreground">{client.fullName}</strong> was paid{" "}
+                <strong className="num text-foreground">{formatCurrency(confirming.payoutAmount)}</strong> for{" "}
+                {formatMonth(confirming.month)}.
+              </>
+            )
           ) : null
         }
         confirmLabel="Mark as paid"
         onConfirm={async () => {
           if (!confirming) return;
           try {
-            await markPaid(confirming.month, "client", client.id);
+            await markPaid(confirming.month, confirming.payoutType, client.id);
             toast.success("Payout marked as paid");
             onChanged();
           } catch (err) {
@@ -505,7 +556,9 @@ function Transactions({ client, onChanged }: { client: ClientDetail; onChanged: 
             header: "Actions",
             meta: { align: "right" },
             cell: (info) =>
-              info.row.original.locked ? (
+              info.row.original.source === "mt5" ? (
+                <span className="text-xs text-muted-foreground">From MT5</span>
+              ) : info.row.original.locked ? (
                 <span className="text-xs text-muted-foreground">Locked</span>
               ) : (
                 <div className="flex justify-end gap-1">
@@ -530,14 +583,18 @@ function Transactions({ client, onChanged }: { client: ClientDetail; onChanged: 
 
   return (
     <>
-      {canEdit ? (
-        <div className="flex items-center justify-between gap-3 border-b px-5 py-3">
-          <p className="text-xs text-muted-foreground">Capital is always the sum of these transactions.</p>
+      <div className="flex items-center justify-between gap-3 border-b px-5 py-3">
+        <p className="text-xs text-muted-foreground">
+          {client.accounts.length
+            ? "Capital = confirmed deposits − withdrawals on the client's MT5 accounts (classify them under Cash events)."
+            : "Capital is the sum of these transactions (pool client without an MT5 account)."}
+        </p>
+        {canEdit && client.accounts.length === 0 ? (
           <Button size="sm" onClick={() => setEditing("new")}>
             <Plus aria-hidden /> Add transaction
           </Button>
-        </div>
-      ) : null}
+        ) : null}
+      </div>
       <DataTable
         columns={columns}
         data={rows}
@@ -575,6 +632,38 @@ function Transactions({ client, onChanged }: { client: ClientDetail; onChanged: 
             throw err;
           }
         }}
+      />
+    </>
+  );
+}
+
+/** The latest closed trades in the client's accounts. */
+function ClientTrades({ client }: { client: ClientDetail }) {
+  const { dataVersion } = useApp();
+  const { data } = useAsync(() => getTrades({ clientId: client.id, pageSize: 50 }), [client.id, dataVersion]);
+  return (
+    <>
+      {data ? (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 border-b px-5 py-3 text-xs text-muted-foreground">
+          <span>
+            <span className="num font-semibold text-foreground">{data.summary.count}</span> closed trades
+          </span>
+          <span>
+            <span className="num font-semibold text-foreground">{formatLots(data.summary.lots)}</span> lots
+          </span>
+          <span>
+            Net <ProfitText value={data.summary.net} className="font-semibold" />
+          </span>
+          <Link href={`/trades?clientId=${encodeURIComponent(client.id)}`} className="ml-auto font-medium text-gold-ink hover:underline">
+            All trades →
+          </Link>
+        </div>
+      ) : null}
+      <DataTable
+        columns={recentTradeColumns.filter((c) => c.id !== "accountLogin" || client.accounts.length > 1)}
+        data={data?.rows ?? []}
+        getRowId={(t) => `${t.accountLogin}:${t.ticket}`}
+        empty={<EmptyState icon={ArrowLeftRight} title="No closed trades yet" description="Trades appear after the accounts sync." />}
       />
     </>
   );

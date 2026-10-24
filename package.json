@@ -11,6 +11,7 @@
     "db:seed": "tsx scripts/seed.ts",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:worker": "cd mt5-worker && .venv\\Scripts\\python -m unittest discover -s tests",
     "db:recompute": "tsx scripts/recompute.ts",
     "example": "tsx scripts/worked-example.ts",
     "user:create": "tsx scripts/create-user.ts",
